@@ -3,18 +3,18 @@
 An experimental ARM64 operating system exploring the interaction model of the
 original Macintosh System Software through the Digital Caviar design language.
 
-The current `0.1 Foundation` milestone boots directly into a 640×480 graphical
-composition with:
+Version 1.0 boots directly into a 640×480 graphical desktop with:
 
 - intentional negative space and asymmetric anchors;
 - opaque light/dark masses instead of simulated glass;
 - one deliberate break in the layout grid;
 - Bayer 8×8 ordered-dither shadows;
 - a restrained, deterministic film-grain texture; and
-- a serial diagnostic channel for bring-up.
-
-This is a graphical foundation, not yet a desktop environment. Input, movable
-windows, persistent files, and applications are subsequent milestones.
+- a serial diagnostic channel for bring-up;
+- virtio tablet and keyboard input;
+- overlapping, draggable application windows and global menus;
+- Harvester, Script, and Acknowledgment experiences; and
+- crash-resistant two-slot persistence for the Script document.
 
 ## Requirements
 
@@ -36,19 +36,20 @@ make run
 ```
 
 QEMU opens a display window and keeps diagnostics on the launching terminal.
-The kernel expects QEMU's `virt` machine and its `ramfb` device.
+The kernel targets QEMU's ARM64 `virt` machine. The generated `document.raw`
+disk retains Script text between launches.
 
 To leave QEMU while using `-serial mon:stdio`, press `Ctrl+A`, then `X`.
 
-## Direction
+## Using the desktop
 
-The intended path is:
+- Click and drag a title bar to move its window.
+- Click a window to bring its application forward.
+- Open **Notes** in Harvester to launch Script.
+- Type directly in Script.
+- Choose **File → Save** to persist the document.
+- Choose **View → Acknowledgment** for system information.
 
-1. graphics primitives and reproducible QEMU boot;
-2. pointer/keyboard input and an event queue;
-3. overlapping windows, menus, and calm critically damped motion;
-4. opaque controls and dialogs;
-5. persistent storage;
-6. Harvester, Script, and a small cooperative application model.
-
-UART remains available throughout for kernel diagnostics.
+The implementation is intentionally a focused single-user desktop rather than
+a Unix-compatible general-purpose system. UART remains available for kernel
+diagnostics.

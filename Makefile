@@ -13,20 +13,31 @@ LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
 
 all: kernel.elf
 
-kernel.elf: boot.o kernel.o linker_arm64.ld
-	$(CC) $(LDFLAGS) -o $@ boot.o kernel.o
+OBJECTS := boot.o kernel.o graphics.o virtio.o desktop.o
 
-kernel.o: kernel.c
+kernel.elf: $(OBJECTS) linker_arm64.ld
+	$(CC) $(LDFLAGS) -o $@ $(OBJECTS)
+
+kernel.o graphics.o virtio.o desktop.o: %.o: %.c os.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 boot.o: boot.S
 	$(CC) $(ASFLAGS) -c $< -o $@
 
-run: kernel.elf
+document.raw:
+	truncate -s 1M $@
+
+run: kernel.elf document.raw
 	$(QEMU) -M virt -cpu cortex-a72 -m 128M \
-		-device ramfb -kernel kernel.elf \
+		-global virtio-mmio.force-legacy=false \
+		-device ramfb \
+		-device virtio-keyboard-device \
+		-device virtio-tablet-device \
+		-drive if=none,id=document,file=document.raw,format=raw,cache=directsync \
+		-device virtio-blk-device,drive=document \
+		-kernel kernel.elf \
 		-serial mon:stdio
 
 clean:
-	rm -f boot.o kernel.o kernel.elf desktop.ppm
+	rm -f $(OBJECTS) kernel.elf desktop.ppm
 

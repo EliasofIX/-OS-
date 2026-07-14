@@ -20,12 +20,12 @@ windows, persistent files, and applications are subsequent milestones.
 
 - Clang with the AArch64 bare-metal target
 - LLD
-- `qemu-system-aarch64`
+- `qemu-system-aarch64` with the SeaBIOS ramfb option ROM
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install clang lld qemu-system-arm
+sudo apt-get install clang lld qemu-system-arm seabios
 ```
 
 ## Build and run

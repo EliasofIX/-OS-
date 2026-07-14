@@ -3,7 +3,8 @@
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x80000;
+    /* QEMU virt DRAM starts at 0x40000000; leave room for its boot data. */
+    . = 0x40080000;
 
     .text : {
         KEEP(*(.text.boot))

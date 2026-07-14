@@ -15,12 +15,16 @@
 #define FW_CFG_BASE     0x09020000UL
 #define FW_CFG_DATA     (*(volatile uint8_t *)(FW_CFG_BASE + 0x00))
 #define FW_CFG_SELECTOR (*(volatile uint16_t *)(FW_CFG_BASE + 0x08))
+#define FW_CFG_DMA      (*(volatile uint64_t *)(FW_CFG_BASE + 0x10))
 #define FW_CFG_FILE_DIR 0x0019
+#define FW_CFG_DMA_ERROR  0x01U
+#define FW_CFG_DMA_SELECT 0x08U
+#define FW_CFG_DMA_WRITE  0x10U
 
 #define SCREEN_WIDTH  640U
 #define SCREEN_HEIGHT 480U
 #define SCREEN_STRIDE (SCREEN_WIDTH * 4U)
-#define FRAMEBUFFER_ADDRESS 0x01000000UL
+#define FRAMEBUFFER_ADDRESS 0x41000000UL
 
 #define RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
 #define VOID_COLOR    RGB(12, 12, 14)
@@ -93,6 +97,14 @@ static uint16_t byte_swap16(uint16_t value) {
     return (uint16_t)((value << 8) | (value >> 8));
 }
 
+static uint32_t byte_swap32(uint32_t value) {
+    return __builtin_bswap32(value);
+}
+
+static uint64_t byte_swap64(uint64_t value) {
+    return __builtin_bswap64(value);
+}
+
 static uint32_t read_be32(void) {
     uint32_t value = 0;
     for (unsigned int i = 0; i < 4; ++i) {
@@ -121,6 +133,9 @@ static int names_equal(const char *left, const char *right, size_t count) {
 static uint16_t fw_cfg_find_file(const char *wanted_name) {
     FW_CFG_SELECTOR = byte_swap16(FW_CFG_FILE_DIR);
     uint32_t count = read_be32();
+    if (count > 256U) {
+        return 0;
+    }
 
     for (uint32_t file = 0; file < count; ++file) {
         (void)read_be32();
@@ -138,31 +153,66 @@ static uint16_t fw_cfg_find_file(const char *wanted_name) {
     return 0;
 }
 
-static void write_be32(uint32_t value) {
-    FW_CFG_DATA = (uint8_t)(value >> 24);
-    FW_CFG_DATA = (uint8_t)(value >> 16);
-    FW_CFG_DATA = (uint8_t)(value >> 8);
-    FW_CFG_DATA = (uint8_t)value;
-}
+struct ramfb_config {
+    uint64_t address;
+    uint32_t fourcc;
+    uint32_t flags;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+} __attribute__((packed));
 
-static void write_be64(uint64_t value) {
-    write_be32((uint32_t)(value >> 32));
-    write_be32((uint32_t)value);
+struct fw_cfg_dma_access {
+    volatile uint32_t control;
+    uint32_t length;
+    uint64_t address;
+} __attribute__((packed, aligned(8)));
+
+static struct ramfb_config ramfb_config;
+static struct fw_cfg_dma_access fw_cfg_dma_access;
+
+static int fw_cfg_dma_write(uint16_t selector, const void *data, uint32_t length) {
+    fw_cfg_dma_access.control =
+        byte_swap32(((uint32_t)selector << 16) | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
+    fw_cfg_dma_access.length = byte_swap32(length);
+    fw_cfg_dma_access.address = byte_swap64((uint64_t)(uintptr_t)data);
+
+    __asm__ volatile("dsb sy" ::: "memory");
+    FW_CFG_DMA = byte_swap64((uint64_t)(uintptr_t)&fw_cfg_dma_access);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    for (uint32_t spins = 0; spins < 1000000U; ++spins) {
+        uint32_t control = byte_swap32(fw_cfg_dma_access.control);
+        if (control == 0) {
+            return 1;
+        }
+        if (control & FW_CFG_DMA_ERROR) {
+            return 0;
+        }
+    }
+    return 0;
 }
 
 static int configure_ramfb(void) {
+    uart_puts("Locating QEMU ramfb...\n");
     uint16_t selector = fw_cfg_find_file("etc/ramfb");
     if (selector == 0) {
         return 0;
     }
 
-    FW_CFG_SELECTOR = byte_swap16(selector);
-    write_be64(FRAMEBUFFER_ADDRESS);
-    write_be32(0x34325258U); // DRM_FORMAT_XRGB8888 ('X', 'R', '2', '4')
-    write_be32(0);
-    write_be32(SCREEN_WIDTH);
-    write_be32(SCREEN_HEIGHT);
-    write_be32(SCREEN_STRIDE);
+    uart_puts("Configuring framebuffer...\n");
+    ramfb_config.address = byte_swap64(FRAMEBUFFER_ADDRESS);
+    ramfb_config.fourcc =
+        byte_swap32(0x34325258U); // DRM_FORMAT_XRGB8888 ('X', 'R', '2', '4')
+    ramfb_config.flags = 0;
+    ramfb_config.width = byte_swap32(SCREEN_WIDTH);
+    ramfb_config.height = byte_swap32(SCREEN_HEIGHT);
+    ramfb_config.stride = byte_swap32(SCREEN_STRIDE);
+
+    if (!fw_cfg_dma_write(selector, &ramfb_config, sizeof(ramfb_config))) {
+        return 0;
+    }
+    uart_puts("Framebuffer configured.\n");
     return 1;
 }
 

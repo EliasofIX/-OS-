@@ -7,6 +7,9 @@
 .align 4
 
 _start:
+    // QEMU passes a device tree pointer in x0 for -kernel boots.
+    mov x19, x0
+
     // QEMU's virt machine may enter at EL2. Establish a predictable EL1
     // environment before touching C code.
     mrs x0, CurrentEL
@@ -23,6 +26,8 @@ _start:
     msr spsr_el2, x0
     adr x0, at_el1
     msr elr_el2, x0
+    dsb sy
+    isb
     eret
 
 at_el1:
@@ -41,7 +46,8 @@ zero_bss:
     b zero_bss
 
 bss_done:
-    // Call main kernel function
+    // Pass the preserved device tree pointer to the kernel.
+    mov x0, x19
     bl kmain
 
 hang:

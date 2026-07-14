@@ -45,6 +45,13 @@ enum dc_app {
     DC_APP_SCRIPT,
 };
 
+enum storage_load_result {
+    STORAGE_LOAD_OK,
+    STORAGE_LOAD_NO_MEDIA,
+    STORAGE_LOAD_EMPTY,
+    STORAGE_LOAD_CORRUPT,
+};
+
 struct window_state {
     struct rect frame;
     int visible;
@@ -64,14 +71,19 @@ struct desktop_state {
     int about_open;
     int save_notice;
     int shift_down;
-    char document[DOCUMENT_CAPACITY];
+    enum storage_load_result storage_status;
+    char document[DOCUMENT_CAPACITY + 1];
     size_t document_length;
     int document_dirty;
+    int needs_redraw;
 };
 
 void uart_puts(const char *text);
 
+void exceptions_init(void);
+
 int graphics_init(void);
+void graphics_prepare_background(void);
 void graphics_begin(void);
 void graphics_present(void);
 void gfx_fill(struct rect area, uint32_t color);
@@ -81,10 +93,11 @@ void gfx_text(int x, int y, const char *text, uint32_t color, int scale);
 void gfx_icon(int x, int y, uint32_t color, int document);
 void gfx_cursor(int x, int y);
 
-void virtio_init(void);
+void virtio_init(const void *dtb);
 int input_poll(struct dc_event *event);
 int storage_available(void);
-int storage_load_document(char *text, size_t capacity, size_t *length);
+enum storage_load_result storage_load_document(char *text, size_t capacity,
+                                               size_t *length);
 int storage_save_document(const char *text, size_t length);
 
 void desktop_init(struct desktop_state *desktop);

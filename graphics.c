@@ -16,6 +16,8 @@
 static volatile uint32_t *const frontbuffer =
     (volatile uint32_t *)FRONTBUFFER_ADDRESS;
 static uint32_t *const backbuffer = (uint32_t *)BACKBUFFER_ADDRESS;
+static uint32_t background[SCREEN_WIDTH * SCREEN_HEIGHT];
+static int background_ready;
 
 static const uint8_t bayer8[8][8] = {
     { 0, 48, 12, 60,  3, 51, 15, 63 },
@@ -223,15 +225,30 @@ void gfx_cursor(int x, int y) {
     }
 }
 
-void graphics_begin(void) {
-    gfx_fill((struct rect){0, 0, SCREEN_WIDTH, SCREEN_HEIGHT}, DC_VOID);
+void graphics_prepare_background(void) {
+    for (int y = 0; y < SCREEN_HEIGHT; ++y) {
+        for (int x = 0; x < SCREEN_WIDTH; ++x) {
+            background[y * SCREEN_WIDTH + x] = DC_VOID;
+        }
+    }
     uint32_t state = 0xC4A71A2BU;
     for (int y = 24; y < SCREEN_HEIGHT; ++y) {
         for (int x = 0; x < SCREEN_WIDTH; ++x) {
             state = state * 1664525U + 1013904223U;
-            if ((state >> 24) == 0 && bayer8[y & 7][x & 7] < 24)
-                backbuffer[y * SCREEN_WIDTH + x] = DC_DEEP;
+            if ((state >> 24) == 0 && bayer8[y & 7][x & 7] < 24) {
+                background[y * SCREEN_WIDTH + x] = DC_DEEP;
+            }
         }
+    }
+    background_ready = 1;
+}
+
+void graphics_begin(void) {
+    if (!background_ready) {
+        graphics_prepare_background();
+    }
+    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; ++i) {
+        backbuffer[i] = background[i];
     }
 }
 

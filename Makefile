@@ -13,15 +13,18 @@ LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
 
 all: kernel.elf
 
-OBJECTS := boot.o kernel.o graphics.o virtio.o desktop.o
+OBJECTS := boot.o kernel.o graphics.o virtio.o fdt.o desktop.o exceptions.o exceptions_asm.o
 
 kernel.elf: $(OBJECTS) linker_arm64.ld
 	$(CC) $(LDFLAGS) -o $@ $(OBJECTS)
 
-kernel.o graphics.o virtio.o desktop.o: %.o: %.c os.h
+kernel.o graphics.o virtio.o fdt.o desktop.o exceptions.o: %.o: %.c os.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 boot.o: boot.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+exceptions_asm.o: exceptions.S
 	$(CC) $(ASFLAGS) -c $< -o $@
 
 document.raw:

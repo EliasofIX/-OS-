@@ -9,7 +9,7 @@ ASFLAGS := --target=$(TARGET) -g
 LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
 	-Wl,-T,linker_arm64.ld -Wl,--build-id=none
 
-.PHONY: all clean run
+.PHONY: all clean run demo-video
 
 all: kernel.elf
 
@@ -40,6 +40,9 @@ run: kernel.elf document.raw
 		-device virtio-blk-device,drive=document \
 		-kernel kernel.elf \
 		-serial mon:stdio
+
+demo-video: kernel.elf
+	python3 scripts/record_demo.py
 
 clean:
 	rm -f $(OBJECTS) kernel.elf desktop.ppm

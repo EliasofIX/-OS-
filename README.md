@@ -41,6 +41,16 @@ disk retains Script text between launches.
 
 To leave QEMU while using `-serial mon:stdio`, press `Ctrl+A`, then `X`.
 
+## Demo video
+
+Record a scripted demonstration to `/opt/cursor/artifacts/digital-caviar-demo.mp4`:
+
+```sh
+make demo-video
+```
+
+The capture walks through boot, opening Script, typing, saving, the acknowledgment dialog, window drag, and the desktop Notes icon.
+
 ## Using the desktop
 
 - Click and drag a title bar to move its window.

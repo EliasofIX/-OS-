@@ -2,3 +2,5 @@
 *.elf
 *.ppm
 document.raw
+demo/frames/
+demo/document.raw

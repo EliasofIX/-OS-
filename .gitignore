@@ -1,0 +1,4 @@
+*.o
+*.elf
+*.ppm
+document.raw

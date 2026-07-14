@@ -1,243 +1,309 @@
-// kernel.c - DIGITAL CAVIAR [OS] Kernel (ARM64, 64-bit)
-// Boots, displays CLI via UART, handles basic commands
-void execute_command(void);
+// DIGITAL CAVIAR [OS] — graphical foundation for QEMU's ARM64 virt machine.
+//
+// The desktop deliberately uses opaque value masses, generous negative space,
+// asymmetry, and one broken grid element. Depth comes from ordered dithering,
+// not transparency.
+
 #include <stdint.h>
+#include <stddef.h>
 
-// PL011 UART base address (QEMU virt machine)
-#define UART_BASE 0x09000000
-#define UART_DR   (UART_BASE + 0x00) // Data register
-#define UART_FR   (UART_BASE + 0x18) // Flag register
-#define UART_FR_TXFF (1 << 5)        // Transmit FIFO full
+#define UART_BASE 0x09000000UL
+#define UART_DR   (*(volatile uint32_t *)(UART_BASE + 0x00))
+#define UART_FR   (*(volatile uint32_t *)(UART_BASE + 0x18))
+#define UART_FR_TXFF (1U << 5)
 
-// Exception levels
-#define EL1 1
-#define EL1h 0x5 // EL1 with SP1
+#define FW_CFG_BASE     0x09020000UL
+#define FW_CFG_DATA     (*(volatile uint8_t *)(FW_CFG_BASE + 0x00))
+#define FW_CFG_SELECTOR (*(volatile uint16_t *)(FW_CFG_BASE + 0x08))
+#define FW_CFG_FILE_DIR 0x0019
 
-// System registers
-#define SPSR_EL1 0xC2000000 // Mask interrupts, AArch64 mode
-#define VBAR_EL1 0xC0000000 // Vector base address
+#define SCREEN_WIDTH  640U
+#define SCREEN_HEIGHT 480U
+#define SCREEN_STRIDE (SCREEN_WIDTH * 4U)
+#define FRAMEBUFFER_ADDRESS 0x01000000UL
 
-// Filesystem stub
-#define MAX_FILES 16
-#define NAME_LEN 32
+#define RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
+#define VOID_COLOR    RGB(12, 12, 14)
+#define DEEP_COLOR    RGB(25, 25, 28)
+#define SHADOW_COLOR  RGB(40, 39, 39)
+#define DIM_COLOR     RGB(176, 173, 166)
+#define SURFACE_COLOR RGB(232, 228, 220)
+#define INK_COLOR     RGB(21, 21, 22)
+#define ACCENT_COLOR  RGB(126, 141, 153)
+#define BREAK_COLOR   RGB(183, 156, 118)
 
-struct file {
-    char name[NAME_LEN];
-    uint64_t size;
+static volatile uint32_t *const framebuffer =
+    (volatile uint32_t *)FRAMEBUFFER_ADDRESS;
+
+static const uint8_t bayer8[8][8] = {
+    { 0, 48, 12, 60,  3, 51, 15, 63 },
+    {32, 16, 44, 28, 35, 19, 47, 31 },
+    { 8, 56,  4, 52, 11, 59,  7, 55 },
+    {40, 24, 36, 20, 43, 27, 39, 23 },
+    { 2, 50, 14, 62,  1, 49, 13, 61 },
+    {34, 18, 46, 30, 33, 17, 45, 29 },
+    {10, 58,  6, 54,  9, 57,  5, 53 },
+    {42, 26, 38, 22, 41, 25, 37, 21 },
 };
 
-struct dir {
-    struct file files[MAX_FILES];
-    uint64_t count;
+struct glyph {
+    char character;
+    uint8_t rows[7];
 };
 
-// Global state
-static struct dir root_dir;
-static char input_buf[256];
-static uint64_t input_pos = 0;
+// Five-bit-wide uppercase display face. Lowercase strings are normalized.
+static const struct glyph font[] = {
+    {' ', {0,0,0,0,0,0,0}}, {'-', {0,0,0,31,0,0,0}},
+    {'.', {0,0,0,0,0,12,12}}, {'/', {1,2,4,8,16,0,0}},
+    {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
+    {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
+    {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,30,1,1,17,14}},
+    {'6', {6,8,16,30,17,17,14}}, {'7', {31,1,2,4,8,8,8}},
+    {'8', {14,17,17,14,17,17,14}}, {'9', {14,17,17,15,1,2,12}},
+    {'A', {14,17,17,31,17,17,17}}, {'B', {30,17,17,30,17,17,30}},
+    {'C', {14,17,16,16,16,17,14}}, {'D', {30,17,17,17,17,17,30}},
+    {'E', {31,16,16,30,16,16,31}}, {'F', {31,16,16,30,16,16,16}},
+    {'G', {14,17,16,23,17,17,14}}, {'H', {17,17,17,31,17,17,17}},
+    {'I', {14,4,4,4,4,4,14}}, {'J', {7,2,2,2,2,18,12}},
+    {'K', {17,18,20,24,20,18,17}}, {'L', {16,16,16,16,16,16,31}},
+    {'M', {17,27,21,21,17,17,17}}, {'N', {17,25,21,19,17,17,17}},
+    {'O', {14,17,17,17,17,17,14}}, {'P', {30,17,17,30,16,16,16}},
+    {'Q', {14,17,17,17,21,18,13}}, {'R', {30,17,17,30,20,18,17}},
+    {'S', {15,16,16,14,1,1,30}}, {'T', {31,4,4,4,4,4,4}},
+    {'U', {17,17,17,17,17,17,14}}, {'V', {17,17,17,17,17,10,4}},
+    {'W', {17,17,17,21,21,21,10}}, {'X', {17,17,10,4,10,17,17}},
+    {'Y', {17,17,10,4,4,4,4}}, {'Z', {31,1,2,4,8,16,31}},
+};
 
-// UART functions
-void uart_putc(char c) {
-    // Wait until transmit FIFO is not full
-    while (*(volatile uint32_t *)UART_FR & UART_FR_TXFF) {}
-    *(volatile uint32_t *)UART_DR = c;
+static void uart_putc(char character) {
+    while (UART_FR & UART_FR_TXFF) {}
+    UART_DR = (uint32_t)character;
 }
 
-void uart_puts(const char *str) {
-    for (int i = 0; str[i]; i++) {
-        if (str[i] == '\n') uart_putc('\r');
-        uart_putc(str[i]);
+static void uart_puts(const char *text) {
+    while (*text) {
+        if (*text == '\n') {
+            uart_putc('\r');
+        }
+        uart_putc(*text++);
     }
 }
 
-// Memory barrier
-void dsb() {
-    __asm__ volatile ("dsb sy");
+static uint16_t byte_swap16(uint16_t value) {
+    return (uint16_t)((value << 8) | (value >> 8));
 }
 
-// Exception vector table
-void vector_table(void);
-__asm__(
-    ".section .text\n"
-    ".align 11\n" // 2KB alignment for VBAR
-    "vector_table:\n"
-    // Synchronous EL1h
-    "b sync_handler\n"
-    ".align 7\n"
-    // IRQ EL1h
-    "b irq_handler\n"
-    ".align 7\n"
-    // FIQ EL1h
-    "b fiq_handler\n"
-    ".align 7\n"
-    // SError EL1h
-    "b serror_handler\n"
-);
-
-// Exception handlers
-void sync_handler(void) {
-    uart_puts("Synchronous exception!\n");
-    while (1);
-}
-
-void irq_handler(void) {
-    // Stub for keyboard (UART input later)
-    uart_puts("IRQ received\n");
-}
-
-void fiq_handler(void) {
-    uart_puts("FIQ received\n");
-    while (1);
-}
-
-void serror_handler(void) {
-    uart_puts("SError received\n");
-    while (1);
-}
-
-// Initialize MMU (stub)
-void init_mmu(void) {
-    // Placeholder: Flat mapping for now
-    // Later: Set up page tables for EL1
-}
-
-// Initialize UART
-void init_uart(void) {
-    // QEMU virt PL011 needs no init for basic use
-    uart_puts("\033[2J\033[H"); // Clear terminal (ANSI)
-}
-
-// Initialize filesystem stub
-void init_filesystem(void) {
-    root_dir.count = 2;
-    for (int i = 0; i < NAME_LEN; i++) {
-        root_dir.files[0].name[i] = 0;
-        root_dir.files[1].name[i] = 0;
+static uint32_t read_be32(void) {
+    uint32_t value = 0;
+    for (unsigned int i = 0; i < 4; ++i) {
+        value = (value << 8) | FW_CFG_DATA;
     }
-    for (int i = 0; i < 8; i++) {
-        root_dir.files[0].name[i] = "welcome.txt"[i];
-        root_dir.files[1].name[i] = "test.txt"[i];
-    }
-    root_dir.files[0].size = 50;
-    root_dir.files[1].size = 10;
+    return value;
 }
 
-// strcmp
-int strcmp(const char *s1, const char *s2) {
-    while (*s1 && *s1 == *s2) {
-        s1++;
-        s2++;
-    }
-    return *s1 - *s2;
+static uint16_t read_be16(void) {
+    uint16_t value = (uint16_t)FW_CFG_DATA << 8;
+    return (uint16_t)(value | FW_CFG_DATA);
 }
 
-// strcpy
-void strcpy(char *dest, const char *src) {
-    while (*src) {
-        *dest++ = *src++;
+static int names_equal(const char *left, const char *right, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (left[i] != right[i]) {
+            return 0;
+        }
+        if (left[i] == '\0') {
+            return 1;
+        }
     }
-    *dest = 0;
+    return 1;
 }
 
-// Print uint64
-void print_uint64(uint64_t n) {
-    char buf[32];
-    int i = 0;
-    if (n == 0) {
-        uart_putc('0');
+static uint16_t fw_cfg_find_file(const char *wanted_name) {
+    FW_CFG_SELECTOR = byte_swap16(FW_CFG_FILE_DIR);
+    uint32_t count = read_be32();
+
+    for (uint32_t file = 0; file < count; ++file) {
+        (void)read_be32();
+        uint16_t selector = read_be16();
+        (void)read_be16();
+
+        char name[56];
+        for (unsigned int i = 0; i < sizeof(name); ++i) {
+            name[i] = (char)FW_CFG_DATA;
+        }
+        if (names_equal(name, wanted_name, sizeof(name))) {
+            return selector;
+        }
+    }
+    return 0;
+}
+
+static void write_be32(uint32_t value) {
+    FW_CFG_DATA = (uint8_t)(value >> 24);
+    FW_CFG_DATA = (uint8_t)(value >> 16);
+    FW_CFG_DATA = (uint8_t)(value >> 8);
+    FW_CFG_DATA = (uint8_t)value;
+}
+
+static void write_be64(uint64_t value) {
+    write_be32((uint32_t)(value >> 32));
+    write_be32((uint32_t)value);
+}
+
+static int configure_ramfb(void) {
+    uint16_t selector = fw_cfg_find_file("etc/ramfb");
+    if (selector == 0) {
+        return 0;
+    }
+
+    FW_CFG_SELECTOR = byte_swap16(selector);
+    write_be64(FRAMEBUFFER_ADDRESS);
+    write_be32(0x34325258U); // DRM_FORMAT_XRGB8888 ('X', 'R', '2', '4')
+    write_be32(0);
+    write_be32(SCREEN_WIDTH);
+    write_be32(SCREEN_HEIGHT);
+    write_be32(SCREEN_STRIDE);
+    return 1;
+}
+
+static void put_pixel(int x, int y, uint32_t color) {
+    if (x < 0 || y < 0 || x >= (int)SCREEN_WIDTH || y >= (int)SCREEN_HEIGHT) {
         return;
     }
-    while (n) {
-        buf[i++] = (n % 10) + '0';
-        n /= 10;
-    }
-    for (int j = i - 1; j >= 0; j--) {
-        uart_putc(buf[j]);
-    }
+    framebuffer[(uint32_t)y * SCREEN_WIDTH + (uint32_t)x] = color;
 }
 
-// Read char from UART (polling for now)
-char uart_getc(void) {
-    // QEMU virt UART input via terminal
-    // Later: Use interrupts
-    while (*(volatile uint32_t *)UART_FR & (1 << 4)) {} // Wait for RXFE
-    return *(volatile uint32_t *)UART_DR;
-}
-
-// Shell
-void shell(void) {
-    uart_puts("Welcome to DIGITAL CAVIAR OS\n");
-    uart_puts("Type 'help' for commands\n");
-    uart_puts("> ");
-    
-    while (1) {
-        char c = uart_getc();
-        if (c == '\r' || c == '\n') {
-            if (input_pos > 0) {
-                uart_puts("\n");
-                execute_command();
-                input_pos = 0;
-                input_buf[0] = 0;
-                uart_puts("> ");
-            }
-        } else if (c == '\b' || c == 0x7F) {
-            if (input_pos > 0) {
-                input_pos--;
-                input_buf[input_pos] = 0;
-                uart_puts("\b \b");
-            }
-        } else if (input_pos < sizeof(input_buf) - 1) {
-            input_buf[input_pos++] = c;
-            input_buf[input_pos] = 0;
-            uart_putc(c);
+static void fill_rect(int x, int y, int width, int height, uint32_t color) {
+    for (int row = y; row < y + height; ++row) {
+        for (int column = x; column < x + width; ++column) {
+            put_pixel(column, row, color);
         }
     }
 }
 
-// Execute command
-void execute_command(void) {
-    if (strcmp(input_buf, "help") == 0) {
-        uart_puts("Commands: help, clear, list, view, go\n");
-    } else if (strcmp(input_buf, "clear") == 0) {
-        uart_puts("\033[2J\033[H");
-    } else if (strcmp(input_buf, "list") == 0) {
-        for (uint64_t i = 0; i < root_dir.count; i++) {
-            uart_puts(root_dir.files[i].name);
-            uart_puts(" (");
-            print_uint64(root_dir.files[i].size);
-            uart_puts(" bytes)\n");
+static void fill_dithered_rect(int x, int y, int width, int height,
+                               uint32_t foreground, uint32_t background,
+                               uint8_t coverage) {
+    for (int row = y; row < y + height; ++row) {
+        for (int column = x; column < x + width; ++column) {
+            uint8_t threshold = bayer8[row & 7][column & 7];
+            put_pixel(column, row, threshold < coverage ? foreground : background);
         }
-    } else if (strcmp(input_buf, "view welcome") == 0) {
-        uart_puts("Welcome to DIGITAL CAVIAR OS!\n");
-    } else if (strcmp(input_buf, "go home") == 0) {
-        uart_puts("Changed to home directory\n");
+    }
+}
+
+static const uint8_t *glyph_rows(char character) {
+    if (character >= 'a' && character <= 'z') {
+        character = (char)(character - 'a' + 'A');
+    }
+    for (size_t i = 0; i < sizeof(font) / sizeof(font[0]); ++i) {
+        if (font[i].character == character) {
+            return font[i].rows;
+        }
+    }
+    return font[0].rows;
+}
+
+static void draw_character(int x, int y, char character, uint32_t color, int scale) {
+    const uint8_t *rows = glyph_rows(character);
+    for (int row = 0; row < 7; ++row) {
+        for (int column = 0; column < 5; ++column) {
+            if (rows[row] & (1U << (4 - column))) {
+                fill_rect(x + column * scale, y + row * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+static void draw_text(int x, int y, const char *text, uint32_t color, int scale) {
+    while (*text) {
+        draw_character(x, y, *text++, color, scale);
+        x += 6 * scale;
+    }
+}
+
+static void draw_icon(int x, int y, uint32_t color, int document) {
+    if (document) {
+        fill_rect(x + 4, y + 1, 18, 26, color);
+        fill_rect(x + 7, y + 6, 12, 2, VOID_COLOR);
+        fill_rect(x + 7, y + 12, 10, 2, VOID_COLOR);
+        fill_rect(x + 7, y + 18, 12, 2, VOID_COLOR);
     } else {
-        uart_puts("Unknown command\n");
+        fill_rect(x + 1, y + 8, 26, 18, color);
+        fill_rect(x + 4, y + 4, 10, 6, color);
+        fill_rect(x + 5, y + 12, 18, 2, VOID_COLOR);
     }
 }
 
-// Kernel entry point
+static void draw_grain(void) {
+    // Deterministic and sparse: texture should be perceived, not announced.
+    uint32_t state = 0xC4A71A2BU;
+    for (uint32_t y = 24; y < SCREEN_HEIGHT; ++y) {
+        for (uint32_t x = 0; x < SCREEN_WIDTH; ++x) {
+            state = state * 1664525U + 1013904223U;
+            if ((state >> 24) == 0 && bayer8[y & 7][x & 7] < 24) {
+                framebuffer[y * SCREEN_WIDTH + x] = DEEP_COLOR;
+            }
+        }
+    }
+}
+
+static void draw_desktop(void) {
+    fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, VOID_COLOR);
+    draw_grain();
+
+    // Quiet top bar: opaque mass and a single value-based separator.
+    fill_rect(0, 0, SCREEN_WIDTH, 24, DEEP_COLOR);
+    fill_rect(0, 23, SCREEN_WIDTH, 1, SHADOW_COLOR);
+    draw_text(22, 8, "DIGITAL CAVIAR", SURFACE_COLOR, 1);
+    draw_text(158, 8, "FILE", DIM_COLOR, 1);
+    draw_text(204, 8, "VIEW", DIM_COLOR, 1);
+
+    // Bayer-stepped shadow under the primary light mass.
+    fill_dithered_rect(82, 78, 424, 300, SHADOW_COLOR, VOID_COLOR, 46);
+    fill_dithered_rect(78, 74, 424, 300, SHADOW_COLOR, VOID_COLOR, 24);
+
+    fill_rect(68, 62, 424, 300, SURFACE_COLOR);
+    fill_rect(68, 62, 424, 28, DIM_COLOR);
+    fill_rect(68, 89, 424, 1, INK_COLOR);
+    fill_rect(78, 71, 9, 9, INK_COLOR);
+    draw_text(103, 72, "HARVESTER", INK_COLOR, 1);
+
+    // A narrow content anchor leaves most of the window deliberately empty.
+    draw_text(114, 116, "SYSTEM", INK_COLOR, 1);
+    draw_text(114, 154, "SCRIPT", INK_COLOR, 1);
+    draw_text(114, 192, "ADJUST", INK_COLOR, 1);
+    draw_icon(78, 108, INK_COLOR, 0);
+    draw_icon(78, 146, INK_COLOR, 1);
+    draw_icon(78, 184, INK_COLOR, 0);
+
+    // The sole grid break: one warm document set apart from the anchor.
+    draw_icon(390, 278, BREAK_COLOR, 1);
+    draw_text(377, 312, "NOTES", INK_COLOR, 1);
+
+    // One focal state, represented as a restrained value block.
+    fill_rect(106, 110, 92, 20, ACCENT_COLOR);
+    draw_text(114, 116, "SYSTEM", SURFACE_COLOR, 1);
+
+    draw_text(22, 448, "0.1 FOUNDATION", DIM_COLOR, 1);
+}
+
 void kmain(void) {
-    // Ensure EL1
-    uint64_t current_el;
-    __asm__ volatile ("mrs %0, CurrentEL" : "=r"(current_el));
-    current_el = (current_el >> 2) & 3;
-    if (current_el != EL1) {
-        uart_puts("Not in EL1, halting\n");
-        while (1);
+    uart_puts("\nDIGITAL CAVIAR [OS]\n");
+    uart_puts("Establishing graphical foundation...\n");
+
+    if (!configure_ramfb()) {
+        uart_puts("ramfb unavailable; start QEMU with -device ramfb\n");
+        while (1) {
+            __asm__ volatile("wfe");
+        }
     }
 
-    // Initialize hardware
-    init_mmu();
-    init_uart();
-    init_filesystem();
+    draw_desktop();
+    __asm__ volatile("dsb sy");
+    uart_puts("Desktop ready: 640x480 XRGB8888\n");
 
-    // Set up exception vectors
-    __asm__ volatile ("msr vbar_el1, %0" : : "r"(vector_table));
-
-    // Enable interrupts (stub for now)
-    __asm__ volatile ("msr daifclr, #2");
-
-    // Start shell
-    shell();
+    while (1) {
+        __asm__ volatile("wfe");
+    }
 }

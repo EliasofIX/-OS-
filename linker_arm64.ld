@@ -6,7 +6,8 @@ SECTIONS {
     . = 0x80000;
 
     .text : {
-        *(.text)
+        KEEP(*(.text.boot))
+        *(.text*)
     }
 
     .rodata : {
@@ -14,14 +15,22 @@ SECTIONS {
     }
 
     .data : {
-        *(.data)
+        *(.data*)
     }
 
-    .bss : {
+    .bss (NOLOAD) : {
+        . = ALIGN(16);
         __bss_start = .;
-        *(.bss)
+        *(.bss*)
         *(COMMON)
+        . = ALIGN(16);
         __bss_end = .;
+    }
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note*)
+        *(.eh_frame*)
     }
 }
 

@@ -1,17 +1,32 @@
-ARCH ?= arm64
+TARGET := aarch64-none-elf
+CC := clang
+QEMU := qemu-system-aarch64
 
-ifeq ($(ARCH),arm64)
-    CC=/opt/homebrew/bin/aarch64-elf-gcc
-    LD=/opt/homebrew/bin/aarch64-elf-ld
-    CFLAGS=-ffreestanding -nostdlib -fno-builtin -fno-stack-protector
-    LDFLAGS=-T linker_arm64.ld
-endif
+CFLAGS := --target=$(TARGET) -std=c11 -O2 -g \
+	-ffreestanding -fno-builtin -fno-stack-protector \
+	-mgeneral-regs-only -Wall -Wextra -Werror
+ASFLAGS := --target=$(TARGET) -g
+LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
+	-Wl,-T,linker_arm64.ld -Wl,--build-id=none
 
-all:
-	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
-	$(CC) $(CFLAGS) -c boot.S -o boot.o
-	$(LD) $(LDFLAGS) -o kernel.elf boot.o kernel.o
+.PHONY: all clean run
+
+all: kernel.elf
+
+kernel.elf: boot.o kernel.o linker_arm64.ld
+	$(CC) $(LDFLAGS) -o $@ boot.o kernel.o
+
+kernel.o: kernel.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+boot.o: boot.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+run: kernel.elf
+	$(QEMU) -M virt -cpu cortex-a72 -m 128M \
+		-device ramfb -kernel kernel.elf \
+		-serial mon:stdio
 
 clean:
-	rm -f *.o kernel.elf
+	rm -f boot.o kernel.o kernel.elf desktop.ppm
 

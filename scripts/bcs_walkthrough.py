@@ -457,9 +457,9 @@ def main() -> int:
     try:
         demo.pause(2.0)
 
-        # Paint segment
+        # Paint segment — open from Harvester (desktop icons are covered).
         start = demo.frame_index
-        demo.click(50, 230)  # desktop Paint icon
+        demo.click(100, 240)  # Harvester → PAINT
         demo.capture(3)
         demo.drag(170, 110, 300, 165)  # pencil
         demo.capture(2)
@@ -483,9 +483,11 @@ def main() -> int:
         if budget > used:
             demo.capture(budget - used)
 
-        # Write / fonts segment
+        # Write / fonts — close Paint, open Script from Harvester.
         start = demo.frame_index
-        demo.click(50, 150)  # Script
+        demo.menu_item(170, 1)  # File → Close
+        demo.pause(0.3)
+        demo.click(100, 180)  # Harvester → SCRIPT
         demo.capture(2)
         demo.type_text("\nHello from Script.\n")
         demo.drag(200, 130, 400, 130)  # select a line

@@ -108,7 +108,7 @@ static void set_default_document(struct desktop_state *desktop) {
 }
 
 static void save_document(struct desktop_state *desktop) {
-    /* script_store is ~50KiB — must not live on the 16KiB boot stack. */
+    /* script_store is ~50KiB — must not live on the boot stack. */
     static struct script_store store;
     zero_bytes(&store, sizeof(store));
     copy_bytes(store.text, desktop->document, desktop->document_length);
@@ -264,10 +264,16 @@ void desktop_init(struct desktop_state *desktop) {
             copy_bytes(desktop->doc_font, loaded.font, loaded.length);
             copy_bytes(desktop->doc_style, loaded.style, loaded.length);
             copy_bytes(desktop->doc_size, loaded.size, loaded.length);
-            desktop->embed_valid = loaded.embed_valid;
-            desktop->embed_width = loaded.embed_width;
-            desktop->embed_height = loaded.embed_height;
-            if (loaded.embed_valid) {
+            desktop->embed_valid = 0;
+            desktop->embed_width = 0;
+            desktop->embed_height = 0;
+            if (loaded.embed_valid && loaded.embed_width >= 1 &&
+                loaded.embed_height >= 1 &&
+                loaded.embed_width <= PAINT_WIDTH &&
+                loaded.embed_height <= PAINT_HEIGHT) {
+                desktop->embed_valid = 1;
+                desktop->embed_width = loaded.embed_width;
+                desktop->embed_height = loaded.embed_height;
                 copy_bytes(desktop->embed_image, loaded.embed_image,
                            (size_t)loaded.embed_width * loaded.embed_height);
             }
@@ -411,6 +417,19 @@ static void clipboard_paste_text(struct desktop_state *desktop) {
     }
 }
 
+static int clipboard_image_bounds(const struct desktop_state *desktop,
+                                  int *width, int *height) {
+    if (desktop->clipboard.kind != CLIP_IMAGE) return 0;
+    int w = desktop->clipboard.image_width;
+    int h = desktop->clipboard.image_height;
+    if (w < 1 || h < 1) return 0;
+    if (w > PAINT_WIDTH) w = PAINT_WIDTH;
+    if (h > PAINT_HEIGHT) h = PAINT_HEIGHT;
+    *width = w;
+    *height = h;
+    return 1;
+}
+
 static void clipboard_copy_paint(struct desktop_state *desktop) {
     int x0 = 0;
     int y0 = 0;
@@ -422,12 +441,15 @@ static void clipboard_copy_paint(struct desktop_state *desktop) {
         x1 = maxi(desktop->marquee_x0, desktop->marquee_x1);
         y1 = maxi(desktop->marquee_y0, desktop->marquee_y1);
     }
+    x0 = clampi(x0, 0, PAINT_WIDTH - 1);
+    y0 = clampi(y0, 0, PAINT_HEIGHT - 1);
+    x1 = clampi(x1, 0, PAINT_WIDTH - 1);
+    y1 = clampi(y1, 0, PAINT_HEIGHT - 1);
     int width = x1 - x0 + 1;
     int height = y1 - y0 + 1;
     if (width < 1 || height < 1) return;
-    if (width > PAINT_WIDTH) width = PAINT_WIDTH;
-    if (height > PAINT_HEIGHT) height = PAINT_HEIGHT;
     zero_bytes(desktop->clipboard.image, sizeof(desktop->clipboard.image));
+    /* Clipboard keeps PAINT_WIDTH stride so Paint paste stays simple. */
     for (int y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x)
             desktop->clipboard.image[y * PAINT_WIDTH + x] =
@@ -443,24 +465,29 @@ static void clipboard_paste_into_script(struct desktop_state *desktop) {
         clipboard_paste_text(desktop);
         return;
     }
-    if (desktop->clipboard.kind != CLIP_IMAGE) return;
+    int width = 0;
+    int height = 0;
+    if (!clipboard_image_bounds(desktop, &width, &height)) return;
     zero_bytes(desktop->embed_image, sizeof(desktop->embed_image));
-    for (int y = 0; y < desktop->clipboard.image_height; ++y)
-        for (int x = 0; x < desktop->clipboard.image_width; ++x)
-            desktop->embed_image[y * PAINT_WIDTH + x] =
+    /* Pack densely (stride == width) to match gfx_bitmap / storage. */
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            desktop->embed_image[y * width + x] =
                 desktop->clipboard.image[y * PAINT_WIDTH + x];
-    desktop->embed_width = desktop->clipboard.image_width;
-    desktop->embed_height = desktop->clipboard.image_height;
+    desktop->embed_width = width;
+    desktop->embed_height = height;
     desktop->embed_valid = 1;
     desktop->document_dirty = 1;
 }
 
 static void clipboard_paste_into_paint(struct desktop_state *desktop) {
-    if (desktop->clipboard.kind != CLIP_IMAGE) return;
+    int width = 0;
+    int height = 0;
+    if (!clipboard_image_bounds(desktop, &width, &height)) return;
     int ox = 12;
     int oy = 12;
-    for (int y = 0; y < desktop->clipboard.image_height; ++y)
-        for (int x = 0; x < desktop->clipboard.image_width; ++x)
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
             if (desktop->clipboard.image[y * PAINT_WIDTH + x])
                 canvas_set(desktop, ox + x, oy + y, 1);
 }
@@ -527,7 +554,7 @@ static void handle_key(struct desktop_state *desktop, uint16_t code,
             while (prev_start > 0 && desktop->document[prev_start - 1] != '\n') {
                 --prev_start;
             }
-            size_t prev_len = prev_end - prev_start + 1;
+            size_t prev_len = prev_end - prev_start; /* exclude trailing '\n' */
             size_t target = prev_start + mini((int)column, (int)prev_len);
             if (desktop->shift_down) {
                 if (!desktop->has_selection) desktop->sel_anchor = desktop->caret;
@@ -605,8 +632,8 @@ static void handle_menu_command(struct desktop_state *desktop, enum menu_id menu
     if (item < 0 || item > max_item) return;
 
     if (menu == MENU_FILE) {
-        if (item == 0) { /* Save */
-            if (desktop->front_app == DC_APP_SCRIPT) save_document(desktop);
+        if (item == 0) { /* Save — always the Script document. */
+            save_document(desktop);
         } else if (item == 1) { /* Close */
             struct window_state *window = front_window(desktop);
             close_window(desktop, window);
@@ -656,6 +683,16 @@ static struct rect script_text_rect(const struct window_state *window) {
                          window->frame.width - 36, window->frame.height - 100};
 }
 
+static int script_text_bottom_y(const struct desktop_state *desktop) {
+    struct rect area = script_text_rect(&desktop->script);
+    int text_bottom = area.y + area.height;
+    if (desktop->embed_valid && desktop->embed_height > 0) {
+        text_bottom -= desktop->embed_height + 24;
+        if (text_bottom < area.y + 24) text_bottom = area.y + 24;
+    }
+    return text_bottom;
+}
+
 static int glyph_metrics(const struct desktop_state *desktop, size_t index,
                          int *advance, int *height) {
     int scale = desktop->doc_size[index] ? desktop->doc_size[index] : 1;
@@ -686,13 +723,39 @@ static size_t word_end_index(const struct desktop_state *desktop, size_t start) 
     return end;
 }
 
+/* Soft-wrap whole words; mid-break glyphs that would pass the right edge.
+ * Returns 1 if a trailing space was dropped onto the wrap (caller should skip it). */
+static int layout_wrap_glyph(const struct desktop_state *desktop, size_t i,
+                             char value, int advance, int height, int area_x,
+                             int right, int *cursor_x, int *cursor_y) {
+    if (value == ' ') {
+        if (*cursor_x + advance > right && *cursor_x > area_x) {
+            *cursor_x = area_x;
+            *cursor_y += height + 2;
+            return 1;
+        }
+        return 0;
+    }
+    size_t end = word_end_index(desktop, i);
+    int word_w = word_pixel_width(desktop, i, end);
+    if (*cursor_x > area_x && *cursor_x + word_w > right) {
+        *cursor_x = area_x;
+        *cursor_y += height + 2;
+    }
+    if (*cursor_x + advance > right && *cursor_x > area_x) {
+        *cursor_x = area_x;
+        *cursor_y += height + 2;
+    }
+    return 0;
+}
+
 static size_t hit_test_document(const struct desktop_state *desktop, int x,
                                 int y) {
     struct rect area = script_text_rect(&desktop->script);
     int cursor_x = area.x;
     int cursor_y = area.y;
     int right = area.x + area.width;
-    int bottom = area.y + area.height;
+    int bottom = script_text_bottom_y(desktop);
     size_t i = 0;
     while (i < desktop->document_length) {
         char value = desktop->document[i];
@@ -706,20 +769,13 @@ static size_t hit_test_document(const struct desktop_state *desktop, int x,
             ++i;
             continue;
         }
-        if (value != ' ') {
-            size_t end = word_end_index(desktop, i);
-            int word_w = word_pixel_width(desktop, i, end);
-            if (cursor_x > area.x && cursor_x + word_w > right) {
-                cursor_x = area.x;
-                cursor_y += height + 2;
-            }
-        } else if (cursor_x + advance > right && cursor_x > area.x) {
-            cursor_x = area.x;
-            cursor_y += height + 2;
+        if (layout_wrap_glyph(desktop, i, value, advance, height, area.x, right,
+                              &cursor_x, &cursor_y)) {
+            if (y < cursor_y) return i;
             ++i;
             continue;
         }
-        if (cursor_y + height >= bottom) break;
+        if (cursor_y + height > bottom) break;
         if (y >= cursor_y && y < cursor_y + height && x >= cursor_x &&
             x < cursor_x + advance) {
             return i + (x > cursor_x + advance / 2 ? 1 : 0);
@@ -782,8 +838,14 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
         if (contains((struct rect){250, 300, 84, 26}, x, y)) {
             desktop->document_length = 0;
             desktop->document[0] = '\0';
+            zero_bytes(desktop->doc_font, sizeof(desktop->doc_font));
+            zero_bytes(desktop->doc_style, sizeof(desktop->doc_style));
+            zero_bytes(desktop->doc_size, sizeof(desktop->doc_size));
             desktop->caret = 0;
             desktop->embed_valid = 0;
+            desktop->embed_width = 0;
+            desktop->embed_height = 0;
+            zero_bytes(desktop->embed_image, sizeof(desktop->embed_image));
             clear_selection(desktop);
             desktop->document_dirty = 1;
             desktop->confirm_new_open = 0;
@@ -865,7 +927,8 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
 
         if (app == DC_APP_SCRIPT) {
             struct rect text = script_text_rect(window);
-            if (contains(text, x, y)) {
+            int text_bottom = script_text_bottom_y(desktop);
+            if (contains(text, x, y) && y < text_bottom) {
                 size_t index_hit = hit_test_document(desktop, x, y);
                 desktop->caret = clampi((int)index_hit, 0,
                                         (int)desktop->document_length);
@@ -982,8 +1045,10 @@ void desktop_handle_event(struct desktop_state *desktop,
             window->frame.y = clampi(window->frame.y, 25,
                                      SCREEN_HEIGHT - 8 - window->frame.height);
         } else if (desktop->selecting && desktop->front_app == DC_APP_SCRIPT) {
-            desktop->caret = hit_test_document(desktop, event->x, event->y);
-            desktop->has_selection = desktop->caret != desktop->sel_anchor;
+            if (event->y < script_text_bottom_y(desktop)) {
+                desktop->caret = hit_test_document(desktop, event->x, event->y);
+                desktop->has_selection = desktop->caret != desktop->sel_anchor;
+            }
         } else if (desktop->stroke_active && desktop->front_app == DC_APP_PAINT) {
             handle_drag_paint(desktop, event->x, event->y);
         }
@@ -1065,11 +1130,7 @@ static void draw_harvester(const struct desktop_state *desktop, int active) {
 
 static void draw_document(const struct desktop_state *desktop) {
     struct rect area = script_text_rect(&desktop->script);
-    int text_bottom = area.y + area.height;
-    if (desktop->embed_valid) {
-        text_bottom -= desktop->embed_height + 24;
-        if (text_bottom < area.y + 24) text_bottom = area.y + 24;
-    }
+    int text_bottom = script_text_bottom_y(desktop);
     int cursor_x = area.x;
     int cursor_y = area.y;
     int right = area.x + area.width;
@@ -1100,20 +1161,12 @@ static void draw_document(const struct desktop_state *desktop) {
             ++i;
             continue;
         }
-        if (value != ' ') {
-            size_t end = word_end_index(desktop, i);
-            int word_w = word_pixel_width(desktop, i, end);
-            if (cursor_x > area.x && cursor_x + word_w > right) {
-                cursor_x = area.x;
-                cursor_y += height + 2;
-                if (cursor_y + 8 >= text_bottom) break;
-            }
-        } else if (cursor_x + advance > right && cursor_x > area.x) {
-            cursor_x = area.x;
-            cursor_y += height + 2;
+        if (layout_wrap_glyph(desktop, i, value, advance, height, area.x, right,
+                              &cursor_x, &cursor_y)) {
             ++i;
             continue;
         }
+        if (cursor_y + 8 >= text_bottom) break;
 
         if (!caret_set && desktop->caret == i) {
             caret_x = cursor_x;

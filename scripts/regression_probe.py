@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import struct
 import subprocess
 import sys
 import time
@@ -14,6 +15,8 @@ KERNEL = ROOT / "kernel.elf"
 DISK = ROOT / "demo" / "regression.raw"
 FRAMES = ROOT / "demo" / "regression_frames"
 WIDTH, HEIGHT = 640, 480
+# 512 * SCRIPT_SLOT_SECTORS from os.h (1+4+4+1+80)
+SCRIPT_SLOT_BYTES = 512 * 90
 failures: list[str] = []
 
 
@@ -30,12 +33,14 @@ def to_abs(x: int, y: int) -> tuple[int, int]:
 
 
 class Qemu:
-    def __init__(self) -> None:
+    def __init__(self, *, reset_disk: bool = True, clear_frames: bool = True) -> None:
         DISK.parent.mkdir(parents=True, exist_ok=True)
-        DISK.write_bytes(b"\0" * (1024 * 1024))
+        if reset_disk or not DISK.exists():
+            DISK.write_bytes(b"\0" * (1024 * 1024))
         FRAMES.mkdir(parents=True, exist_ok=True)
-        for old in FRAMES.glob("*.ppm"):
-            old.unlink()
+        if clear_frames:
+            for old in FRAMES.glob("*.ppm"):
+                old.unlink()
         self.proc = subprocess.Popen(
             [
                 "qemu-system-aarch64",
@@ -157,23 +162,6 @@ class Qemu:
         self.click(mx, 12)
         self.click(mx + 20, 24 + item * 28 + 14)
 
-    def type_text(self, text: str) -> None:
-        for character in text:
-            if character == " ":
-                code = "spc"
-            elif character == "\n":
-                code = "ret"
-            else:
-                code = character.lower()
-            keys = [{"type": "qcode", "data": code}]
-            if character.isupper():
-                keys = [
-                    {"type": "qcode", "data": "shift"},
-                    {"type": "qcode", "data": code},
-                ]
-            self._qmp({"execute": "send-key", "arguments": {"keys": keys}})
-            time.sleep(0.05)
-
     def capture(self, name: str) -> Path:
         path = FRAMES / f"{name}.ppm"
         self._qmp(
@@ -189,35 +177,7 @@ class Qemu:
         self.proc.wait(timeout=10)
 
 
-def ppm_has_ink_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
-    data = path.read_bytes()
-    # Robust parse
-    lines = []
-    pos = 0
-    while len(lines) < 3:
-        nl = data.find(b"\n", pos)
-        line = data[pos:nl]
-        pos = nl + 1
-        if line.startswith(b"#"):
-            continue
-        lines.append(line)
-    magic = lines[0]
-    dims = lines[1].split()
-    width = int(dims[0])
-    height = int(dims[1])
-    raw = data[pos:]
-    assert magic == b"P6"
-    for y in range(y0, min(y1, height)):
-        for x in range(x0, min(x1, width)):
-            i = (y * width + x) * 3
-            r, g, b = raw[i], raw[i + 1], raw[i + 2]
-            if r < 40 and g < 40 and b < 40:
-                return True
-    return False
-
-
-def ppm_has_light_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
-    """Detect light UI text (e.g. menubar labels on a dark bar)."""
+def _ppm_pixels(path: Path) -> tuple[int, int, bytes]:
     data = path.read_bytes()
     lines = []
     pos = 0
@@ -230,12 +190,41 @@ def ppm_has_light_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> boo
         lines.append(line)
     width = int(lines[1].split()[0])
     height = int(lines[1].split()[1])
-    raw = data[pos:]
+    return width, height, data[pos:]
+
+
+def ppm_has_ink_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
+    """Detect DC_INK (~21,21,22), ignoring desktop void/deep fills."""
+    width, height, raw = _ppm_pixels(path)
+    for y in range(y0, min(y1, height)):
+        for x in range(x0, min(x1, width)):
+            i = (y * width + x) * 3
+            r, g, b = raw[i], raw[i + 1], raw[i + 2]
+            if 16 <= r <= 24 and 16 <= g <= 24 and 16 <= b <= 26:
+                return True
+    return False
+
+
+def ppm_has_light_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
+    """Detect light UI text (e.g. menubar labels on a dark bar)."""
+    width, height, raw = _ppm_pixels(path)
     for y in range(y0, min(y1, height)):
         for x in range(x0, min(x1, width)):
             i = (y * width + x) * 3
             r, g, b = raw[i], raw[i + 1], raw[i + 2]
             if r > 140 and g > 140 and b > 140:
+                return True
+    return False
+
+
+def ppm_has_status_tone(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
+    """Detect status-line accent/break text (not void/deep desktop)."""
+    width, height, raw = _ppm_pixels(path)
+    for y in range(y0, min(y1, height)):
+        for x in range(x0, min(x1, width)):
+            i = (y * width + x) * 3
+            r, g, b = raw[i], raw[i + 1], raw[i + 2]
+            if r > 100 and g > 100 and b > 90:
                 return True
     return False
 
@@ -251,55 +240,75 @@ def main() -> int:
         if not ppm_has_light_in_rect(boot, 8, 4, 200, 20):
             fail("menubar text missing after boot (font/stack corruption?)")
 
-        # Open paint via desktop icon (no window covering)
-        qemu.click(50, 230)
-        # Draw
+        # Open Paint from Harvester.
+        qemu.click(100, 240)
+        time.sleep(0.3)
         qemu.drag(180, 120, 300, 170)
         shot = qemu.capture("paint_draw")
         if not ppm_has_ink_in_rect(shot, 148, 90, 400, 250):
             fail("paint stroke did not leave ink on canvas")
 
-        # RECT tool should switch (click tool, not icon)
-        qemu.click(100, 174)
+        qemu.click(100, 174)  # RECT
         qemu.drag(200, 110, 310, 180)
         qemu.capture("paint_rect")
 
-        # Copy via select + edit
-        qemu.click(100, 230)
+        qemu.click(100, 230)  # SELECT
         qemu.drag(160, 100, 330, 200)
-        qemu.menu(210, 1)
+        qemu.menu(210, 1)  # Edit → Copy
         qemu.capture("copied")
 
-        # Script + paste
-        qemu.click(50, 150)
+        # File → Close Paint, Harvester → SCRIPT, Edit → Paste.
+        qemu.menu(170, 1)
+        time.sleep(0.35)
+        qemu.click(100, 180)
+        time.sleep(0.35)
         qemu.menu(210, 2)
         shot = qemu.capture("pasted")
-        # Status bar should mention clipboard picture or pasted content area
-        if not ppm_has_ink_in_rect(shot, 190, 280, 450, 380):
-            # soft check: at least script window still up
-            pass
+        if not ppm_has_ink_in_rect(shot, 188, 260, 420, 360):
+            fail("pasted picture missing or scrambled in Script")
 
-        # Font menu london on selection
         qemu.drag(200, 130, 400, 130)
         qemu.menu(270, 2)
         qemu.menu(320, 1)
         qemu.capture("styled")
 
-        # Save rich doc
-        qemu.menu(170, 0)
-        qemu.capture("saved")
+        qemu.menu(170, 0)  # File → Save
+        shot = qemu.capture("saved")
+        if not ppm_has_status_tone(shot, 20, 448, 160, 470):
+            fail("save status missing from status line")
 
-        # New confirm appears
-        qemu.menu(170, 2)
-        shot = qemu.capture("confirm_new")
-        # Cancel
-        qemu.click(380, 310)
+        qemu.menu(170, 2)  # File → New
+        qemu.capture("confirm_new")
+        qemu.click(380, 310)  # Cancel
         qemu.capture("confirm_cancelled")
 
-        # Tool click while paint overlaps icons: reopen paint, click RECT
-        qemu.click(50, 230)
+        # Reopen Paint from Harvester and click RECT.
+        qemu.click(100, 240)
         qemu.click(100, 174)
         qemu.capture("tool_over_icons")
+    finally:
+        qemu.close()
+
+    disk = DISK.read_bytes()
+    magic = (0x4443415649415232).to_bytes(8, "little")
+    if disk[0:8] != magic and disk[SCRIPT_SLOT_BYTES : SCRIPT_SLOT_BYTES + 8] != magic:
+        fail("save did not persist a V2 commit to disk")
+        return 1
+
+    _m, _g, _gi, _length, _li, _cs, _meta, ev, ew, eh, _ec = struct.unpack_from(
+        "<QQQIIIIIIII", disk, 0
+    )
+    if ev == 0 or ew < 1 or eh < 1:
+        fail("saved commit has no embedded picture")
+        return 1
+
+    qemu = Qemu(reset_disk=False, clear_frames=False)
+    try:
+        time.sleep(2.0)
+        qemu.click(120, 180)  # Harvester → SCRIPT
+        shot = qemu.capture("reloaded")
+        if not ppm_has_ink_in_rect(shot, 188, 260, 420, 360):
+            fail("reloaded document missing embedded picture after save")
     finally:
         qemu.close()
 

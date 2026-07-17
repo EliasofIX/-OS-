@@ -614,9 +614,17 @@ static int valid_commit_v2(const struct document_commit *commit) {
     if (commit->magic != DOCUMENT_MAGIC_V2 ||
         commit->generation_inverse != ~commit->generation ||
         commit->length_inverse != ~commit->length ||
-        commit->length > DOCUMENT_CAPACITY ||
-        commit->embed_width > PAINT_WIDTH ||
-        commit->embed_height > PAINT_HEIGHT) {
+        commit->length > DOCUMENT_CAPACITY) {
+        return 0;
+    }
+    if (commit->embed_valid) {
+        if (commit->embed_width < 1 || commit->embed_height < 1 ||
+            commit->embed_width > PAINT_WIDTH ||
+            commit->embed_height > PAINT_HEIGHT) {
+            return 0;
+        }
+    } else if (commit->embed_width != 0 || commit->embed_height != 0 ||
+               commit->embed_checksum != 0) {
         return 0;
     }
     return commit->metadata_checksum ==
@@ -694,8 +702,18 @@ static int read_slot_v2(int slot, struct document_commit *commit, char *text,
     uint32_t rich = checksum(text, commit->length) ^
                     checksum(attrs, commit->length);
     if (commit->embed_valid) {
-        rich ^= checksum(embed_image,
-                         (size_t)commit->embed_width * commit->embed_height);
+        size_t embed_bytes =
+            (size_t)commit->embed_width * commit->embed_height;
+        if (embed_bytes > EMBED_IMAGE_BYTES) {
+            return -1;
+        }
+        uint32_t image_sum = checksum(embed_image, embed_bytes);
+        if (commit->embed_checksum != image_sum) {
+            return -1;
+        }
+        rich ^= image_sum;
+    } else if (commit->embed_checksum != 0) {
+        return -1;
     }
     return rich == commit->checksum ? 1 : -1;
 }
@@ -849,14 +867,26 @@ int storage_save_script(const struct script_store *doc) {
     static uint8_t embed_meta[512];
     zero_memory(embed_meta, sizeof(embed_meta));
     embed_meta[0] = doc->embed_valid ? 1 : 0;
+    if (doc->embed_valid) {
+        embed_meta[1] = (uint8_t)(doc->embed_width & 0xFF);
+        embed_meta[2] = (uint8_t)((doc->embed_width >> 8) & 0xFF);
+        embed_meta[3] = (uint8_t)(doc->embed_height & 0xFF);
+        embed_meta[4] = (uint8_t)((doc->embed_height >> 8) & 0xFF);
+    }
     if (!write_sector(first_sector + 1 + SCRIPT_TEXT_SECTORS + SCRIPT_ATTR_SECTORS,
                       embed_meta)) {
         return 0;
     }
     zero_memory(embed_scratch, sizeof(embed_scratch));
+    size_t embed_bytes = 0;
     if (doc->embed_valid) {
-        copy_memory(embed_scratch, doc->embed_image,
-                    (size_t)doc->embed_width * doc->embed_height);
+        if (doc->embed_width < 1 || doc->embed_height < 1 ||
+            doc->embed_width > PAINT_WIDTH ||
+            doc->embed_height > PAINT_HEIGHT) {
+            return 0;
+        }
+        embed_bytes = (size_t)doc->embed_width * doc->embed_height;
+        copy_memory(embed_scratch, doc->embed_image, embed_bytes);
     }
     for (int sector = 0; sector < EMBED_IMAGE_SECTORS; ++sector) {
         if (!write_sector(first_sector + 1 + SCRIPT_TEXT_SECTORS +
@@ -875,13 +905,13 @@ int storage_save_script(const struct script_store *doc) {
     commit.length = (uint32_t)doc->length;
     commit.length_inverse = ~commit.length;
     commit.embed_valid = doc->embed_valid ? 1U : 0U;
-    commit.embed_width = (uint32_t)doc->embed_width;
-    commit.embed_height = (uint32_t)doc->embed_height;
+    commit.embed_width = doc->embed_valid ? (uint32_t)doc->embed_width : 0U;
+    commit.embed_height = doc->embed_valid ? (uint32_t)doc->embed_height : 0U;
+    commit.embed_checksum =
+        doc->embed_valid ? checksum(embed_scratch, embed_bytes) : 0U;
     commit.checksum = checksum(scratch, doc->length) ^ checksum(attrs, doc->length);
     if (doc->embed_valid) {
-        commit.checksum ^=
-            checksum(embed_scratch,
-                     (size_t)doc->embed_width * doc->embed_height);
+        commit.checksum ^= commit.embed_checksum;
     }
     commit.metadata_checksum =
         checksum(&commit, offsetof(struct document_commit, metadata_checksum));

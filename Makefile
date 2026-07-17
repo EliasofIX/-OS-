@@ -9,7 +9,7 @@ ASFLAGS := --target=$(TARGET) -g
 LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
 	-Wl,-T,linker_arm64.ld -Wl,--build-id=none
 
-.PHONY: all clean run demo-video
+.PHONY: all clean run demo-video walkthrough probe-issues
 
 all: kernel.elf
 
@@ -43,6 +43,12 @@ run: kernel.elf document.raw
 
 demo-video: kernel.elf
 	python3 scripts/record_demo.py
+
+walkthrough: kernel.elf
+	python3 scripts/jobs_walkthrough.py
+
+probe-issues: kernel.elf
+	python3 scripts/probe_issues.py
 
 clean:
 	rm -f $(OBJECTS) kernel.elf desktop.ppm

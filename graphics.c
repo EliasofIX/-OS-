@@ -35,7 +35,8 @@ struct glyph {
     uint8_t rows[7];
 };
 
-static const struct glyph font[] = {
+/* Chicago-like system face (original Digital Caviar glyphs). */
+static const struct glyph font_chicago[] = {
     {' ', {0,0,0,0,0,0,0}}, {'!', {4,4,4,4,4,0,4}},
     {'"', {10,10,10,0,0,0,0}}, {'#', {10,31,10,10,31,10,0}},
     {'%', {17,2,4,8,17,0,0}}, {'&', {12,18,20,8,21,18,13}},
@@ -64,6 +65,76 @@ static const struct glyph font[] = {
     {'S', {15,16,16,14,1,1,30}}, {'T', {31,4,4,4,4,4,4}},
     {'U', {17,17,17,17,17,17,14}}, {'V', {17,17,17,17,17,10,4}},
     {'W', {17,17,17,21,21,21,10}}, {'X', {17,17,10,4,10,17,17}},
+    {'Y', {17,17,10,4,4,4,4}}, {'Z', {31,1,2,4,8,16,31}},
+    {'[', {14,8,8,8,8,8,14}}, {'\\',{16,8,4,2,1,0,0}},
+    {']', {14,2,2,2,2,2,14}}, {'_', {0,0,0,0,0,0,31}},
+};
+
+/* Geneva-like: slightly condensed / rounded. */
+static const struct glyph font_geneva[] = {
+    {' ', {0,0,0,0,0,0,0}}, {'!', {4,4,4,4,0,0,4}},
+    {'"', {10,10,0,0,0,0,0}}, {'#', {10,31,10,31,10,0,0}},
+    {'%', {19,20,8,4,2,19,0}}, {'&', {4,10,4,10,17,17,14}},
+    {'\'',{4,4,0,0,0,0,0}}, {'(', {2,4,4,4,4,4,2}},
+    {')', {8,4,4,4,4,4,8}}, {'*', {0,4,21,14,21,4,0}},
+    {'+', {0,4,4,31,4,4,0}}, {',', {0,0,0,0,4,4,8}},
+    {'-', {0,0,0,14,0,0,0}}, {'.', {0,0,0,0,0,4,0}},
+    {'/', {1,2,4,8,16,0,0}}, {':', {0,4,0,0,4,0,0}},
+    {';', {0,4,0,0,4,4,8}}, {'<', {2,4,8,16,8,4,2}},
+    {'=', {0,0,31,0,31,0,0}}, {'>', {8,4,2,1,2,4,8}},
+    {'?', {14,17,1,2,4,0,4}}, {'@', {14,17,23,21,22,16,15}},
+    {'0', {14,17,17,17,17,17,14}}, {'1', {4,12,4,4,4,4,14}},
+    {'2', {14,17,1,6,8,16,31}}, {'3', {14,17,1,6,1,17,14}},
+    {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,30,1,1,17,14}},
+    {'6', {14,16,16,30,17,17,14}}, {'7', {31,1,2,4,4,4,4}},
+    {'8', {14,17,17,14,17,17,14}}, {'9', {14,17,17,15,1,1,14}},
+    {'A', {14,17,17,31,17,17,17}}, {'B', {30,17,17,30,17,17,30}},
+    {'C', {14,17,16,16,16,17,14}}, {'D', {30,17,17,17,17,17,30}},
+    {'E', {31,16,16,30,16,16,31}}, {'F', {31,16,16,30,16,16,16}},
+    {'G', {14,17,16,23,17,17,14}}, {'H', {17,17,17,31,17,17,17}},
+    {'I', {14,4,4,4,4,4,14}}, {'J', {7,2,2,2,2,18,12}},
+    {'K', {17,18,20,24,20,18,17}}, {'L', {16,16,16,16,16,16,31}},
+    {'M', {17,27,21,21,17,17,17}}, {'N', {17,25,21,19,17,17,17}},
+    {'O', {14,17,17,17,17,17,14}}, {'P', {30,17,17,30,16,16,16}},
+    {'Q', {14,17,17,17,21,18,13}}, {'R', {30,17,17,30,20,18,17}},
+    {'S', {15,16,16,14,1,1,30}}, {'T', {31,4,4,4,4,4,4}},
+    {'U', {17,17,17,17,17,17,14}}, {'V', {17,17,17,17,17,10,4}},
+    {'W', {17,17,17,21,21,21,10}}, {'X', {17,17,10,4,10,17,17}},
+    {'Y', {17,17,10,4,4,4,4}}, {'Z', {31,1,2,4,8,16,31}},
+    {'[', {14,8,8,8,8,8,14}}, {'\\',{16,8,4,2,1,0,0}},
+    {']', {14,2,2,2,2,2,14}}, {'_', {0,0,0,0,0,0,31}},
+};
+
+/* London-like: decorative / blackletter-ish capitals. */
+static const struct glyph font_london[] = {
+    {' ', {0,0,0,0,0,0,0}}, {'!', {4,4,4,4,0,4,4}},
+    {'"', {10,10,10,0,0,0,0}}, {'#', {10,31,10,10,31,10,0}},
+    {'%', {17,2,4,8,17,0,0}}, {'&', {12,18,20,8,21,18,13}},
+    {'\'',{4,4,2,0,0,0,0}}, {'(', {2,4,8,8,8,4,2}},
+    {')', {8,4,2,2,2,4,8}}, {'*', {4,21,14,4,14,21,4}},
+    {'+', {0,4,4,31,4,4,0}}, {',', {0,0,0,0,6,4,8}},
+    {'-', {0,0,0,31,0,0,0}}, {'.', {0,0,0,0,0,12,12}},
+    {'/', {1,2,4,8,16,0,0}}, {':', {0,12,12,0,12,12,0}},
+    {';', {0,12,12,0,6,4,8}}, {'<', {2,4,8,16,8,4,2}},
+    {'=', {0,0,31,0,31,0,0}}, {'>', {8,4,2,1,2,4,8}},
+    {'?', {14,17,1,2,4,0,4}}, {'@', {14,17,23,21,23,16,14}},
+    {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
+    {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
+    {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,30,1,1,17,14}},
+    {'6', {6,8,16,30,17,17,14}}, {'7', {31,1,2,4,8,8,8}},
+    {'8', {14,17,17,14,17,17,14}}, {'9', {14,17,17,15,1,2,12}},
+    {'A', {4,14,17,17,31,17,17}}, {'B', {28,18,18,28,18,18,28}},
+    {'C', {14,17,16,16,16,17,14}}, {'D', {28,18,17,17,17,18,28}},
+    {'E', {31,16,16,30,16,16,31}}, {'F', {31,16,16,30,16,16,16}},
+    {'G', {14,17,16,19,17,17,15}}, {'H', {17,17,17,31,17,17,17}},
+    {'I', {14,4,4,4,4,4,14}}, {'J', {7,2,2,2,18,18,12}},
+    {'K', {17,18,20,24,20,18,17}}, {'L', {16,16,16,16,16,16,31}},
+    {'M', {17,27,21,21,17,17,17}}, {'N', {17,17,25,21,19,17,17}},
+    {'O', {14,17,17,17,17,17,14}}, {'P', {30,17,17,30,16,16,16}},
+    {'Q', {14,17,17,17,21,18,13}}, {'R', {30,17,17,30,20,18,17}},
+    {'S', {15,16,14,1,1,17,30}}, {'T', {31,4,4,4,4,4,4}},
+    {'U', {17,17,17,17,17,17,14}}, {'V', {17,17,17,17,10,10,4}},
+    {'W', {17,17,17,21,21,10,10}}, {'X', {17,10,4,4,4,10,17}},
     {'Y', {17,17,10,4,4,4,4}}, {'Z', {31,1,2,4,8,16,31}},
     {'[', {14,8,8,8,8,8,14}}, {'\\',{16,8,4,2,1,0,0}},
     {']', {14,2,2,2,2,2,14}}, {'_', {0,0,0,0,0,0,31}},
@@ -167,40 +238,108 @@ void gfx_fill(struct rect area, uint32_t color) {
         for (int x = x0; x < x1; ++x) backbuffer[y * SCREEN_WIDTH + x] = color;
 }
 
-void gfx_dither(struct rect area, uint32_t foreground, uint32_t background,
+void gfx_dither(struct rect area, uint32_t foreground, uint32_t background_color,
                 uint8_t coverage) {
     for (int y = area.y; y < area.y + area.height; ++y)
         for (int x = area.x; x < area.x + area.width; ++x)
-            pixel(x, y, bayer8[y & 7][x & 7] < coverage ? foreground : background);
+            pixel(x, y, bayer8[y & 7][x & 7] < coverage ? foreground
+                                                        : background_color);
 }
 
-static const uint8_t *glyph_rows(char character) {
+void gfx_hline(int x, int y, int width, uint32_t color) {
+    for (int column = 0; column < width; ++column) pixel(x + column, y, color);
+}
+
+void gfx_vline(int x, int y, int height, uint32_t color) {
+    for (int row = 0; row < height; ++row) pixel(x, y + row, color);
+}
+
+void gfx_rect_outline(struct rect area, uint32_t color) {
+    gfx_hline(area.x, area.y, area.width, color);
+    gfx_hline(area.x, area.y + area.height - 1, area.width, color);
+    gfx_vline(area.x, area.y, area.height, color);
+    gfx_vline(area.x + area.width - 1, area.y, area.height, color);
+}
+
+static const struct glyph *font_table(enum dc_font font, size_t *count) {
+    if (font == DC_FONT_GENEVA) {
+        *count = sizeof(font_geneva) / sizeof(font_geneva[0]);
+        return font_geneva;
+    }
+    if (font == DC_FONT_LONDON) {
+        *count = sizeof(font_london) / sizeof(font_london[0]);
+        return font_london;
+    }
+    *count = sizeof(font_chicago) / sizeof(font_chicago[0]);
+    return font_chicago;
+}
+
+static const uint8_t *glyph_rows(char character, enum dc_font font) {
+    size_t count = 0;
+    const struct glyph *table = font_table(font, &count);
     if (character >= 'a' && character <= 'z') character -= ('a' - 'A');
-    for (size_t i = 0; i < sizeof(font) / sizeof(font[0]); ++i)
-        if (font[i].character == character) return font[i].rows;
-    return font[0].rows;
+    for (size_t i = 0; i < count; ++i)
+        if (table[i].character == character) return table[i].rows;
+    return table[0].rows;
 }
 
-static void character(int x, int y, char value, uint32_t color, int scale) {
-    const uint8_t *rows = glyph_rows(value);
-    for (int row = 0; row < 7; ++row)
-        for (int column = 0; column < 5; ++column)
-            if (rows[row] & (1U << (4 - column)))
+int gfx_font_advance(enum dc_font font, int scale) {
+    if (font == DC_FONT_GENEVA) return 5 * scale;
+    if (font == DC_FONT_LONDON) return 7 * scale;
+    return 6 * scale;
+}
+
+int gfx_font_height(int scale) { return 9 * scale; }
+
+static void draw_glyph(int x, int y, char value, uint32_t color, int scale,
+                       enum dc_font font, uint8_t style) {
+    const uint8_t *rows = glyph_rows(value, font);
+    int bold = (style & DC_STYLE_BOLD) != 0;
+    int london = font == DC_FONT_LONDON;
+    for (int row = 0; row < 7; ++row) {
+        for (int column = 0; column < 5; ++column) {
+            if (rows[row] & (1U << (4 - column))) {
                 gfx_fill((struct rect){x + column * scale, y + row * scale,
-                                       scale, scale}, color);
+                                       scale, scale},
+                         color);
+                if (bold || london) {
+                    gfx_fill((struct rect){x + column * scale + scale,
+                                           y + row * scale, scale, scale},
+                             color);
+                }
+                if (london && row == 0) {
+                    gfx_fill((struct rect){x + column * scale,
+                                           y + row * scale - scale, scale,
+                                           scale},
+                             color);
+                }
+            }
+        }
+    }
+    if (style & DC_STYLE_UNDERLINE) {
+        int width = 5 * scale + ((bold || london) ? scale : 0);
+        gfx_fill((struct rect){x, y + 7 * scale, width, scale > 1 ? 2 : 1},
+                 color);
+    }
 }
 
-void gfx_text(int x, int y, const char *text, uint32_t color, int scale) {
+void gfx_text_font(int x, int y, const char *text, uint32_t color, int scale,
+                   enum dc_font font, uint8_t style) {
+    int origin = x;
     while (*text) {
         if (*text == '\n') {
-            y += 10 * scale;
-            x = 0;
+            y += gfx_font_height(scale);
+            x = origin;
         } else {
-            character(x, y, *text, color, scale);
-            x += 6 * scale;
+            draw_glyph(x, y, *text, color, scale, font, style);
+            x += gfx_font_advance(font, scale);
         }
         ++text;
     }
+}
+
+void gfx_text(int x, int y, const char *text, uint32_t color, int scale) {
+    gfx_text_font(x, y, text, color, scale, DC_FONT_CHICAGO, 0);
 }
 
 void gfx_icon(int x, int y, uint32_t color, int document) {
@@ -216,13 +355,40 @@ void gfx_icon(int x, int y, uint32_t color, int document) {
     }
 }
 
-void gfx_cursor(int x, int y) {
-    for (int row = 0; row < 15; ++row) {
-        int width = row < 10 ? row / 2 + 1 : 3;
-        for (int column = 0; column < width; ++column)
-            pixel(x + column, y + row, DC_SURFACE);
-        pixel(x + width, y + row, DC_INK);
+void gfx_paint_icon(int x, int y, uint32_t color) {
+    gfx_fill((struct rect){x + 2, y + 2, 22, 22}, DC_SURFACE);
+    gfx_rect_outline((struct rect){x + 2, y + 2, 22, 22}, color);
+    gfx_fill((struct rect){x + 6, y + 6, 6, 6}, DC_BREAK);
+    gfx_fill((struct rect){x + 14, y + 8, 6, 6}, DC_ACCENT);
+    gfx_fill((struct rect){x + 8, y + 14, 10, 6}, color);
+}
+
+void gfx_bitmap(int x, int y, const uint8_t *bits, int width, int height,
+                uint32_t ink, uint32_t paper, int draw_paper) {
+    for (int row = 0; row < height; ++row) {
+        for (int column = 0; column < width; ++column) {
+            uint8_t on = bits[row * width + column];
+            if (on) {
+                pixel(x + column, y + row, ink);
+            } else if (draw_paper) {
+                pixel(x + column, y + row, paper);
+            }
+        }
     }
+}
+
+void gfx_cursor(int x, int y) {
+    static const uint8_t tip[11] = {1, 2, 3, 4, 5, 6, 7, 8, 3, 3, 3};
+    for (int row = 0; row < 11; ++row) {
+        for (int column = 0; column < tip[row]; ++column) {
+            pixel(x + column, y + row, DC_INK);
+            if (column == tip[row] - 1 || row == 0)
+                pixel(x + column, y + row, DC_SURFACE);
+        }
+        pixel(x + tip[row], y + row, DC_INK);
+    }
+    gfx_hline(x + 1, y + 11, 3, DC_INK);
+    gfx_hline(x + 2, y + 12, 2, DC_INK);
 }
 
 void graphics_prepare_background(void) {

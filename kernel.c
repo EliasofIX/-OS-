@@ -22,7 +22,7 @@ void uart_puts(const char *text) {
 void kmain(const void *dtb) {
     exceptions_init();
 
-    uart_puts("\nDIGITAL CAVIAR [OS] 1.0\n");
+    uart_puts("\nDIGITAL CAVIAR [OS] 1.1\n");
     uart_puts("Establishing display...\n");
     if (!graphics_init()) {
         uart_puts("fatal: QEMU ramfb unavailable\n");
@@ -35,7 +35,8 @@ void kmain(const void *dtb) {
     uart_puts("Discovering devices...\n");
     virtio_init(dtb);
 
-    struct desktop_state desktop;
+    /* Large paint/document buffers must not live on the 16KiB boot stack. */
+    static struct desktop_state desktop;
     desktop_init(&desktop);
     desktop.needs_redraw = 1;
 

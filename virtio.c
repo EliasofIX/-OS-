@@ -414,7 +414,8 @@ static int handle_input_packet(struct input_device *device,
                 (int)((uint64_t)packet->value * (SCREEN_HEIGHT - 1) / 32767U);
             device->move_pending = 1;
         }
-        return 0;
+        /* Emit immediately so QMP abs streams without SYN still drag. */
+        return emit_tablet_move(device, event);
     }
     if (device->kind == INPUT_TABLET && packet->type == EV_SYN &&
         packet->code == SYN_REPORT) {

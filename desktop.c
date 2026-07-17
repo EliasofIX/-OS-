@@ -5,36 +5,103 @@ static int contains(struct rect area, int x, int y) {
            x < area.x + area.width && y < area.y + area.height;
 }
 
+static int mini(int a, int b) { return a < b ? a : b; }
+static int maxi(int a, int b) { return a > b ? a : b; }
+static int clampi(int value, int lo, int hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+static void zero_bytes(void *memory, size_t size) {
+    uint8_t *bytes = (uint8_t *)memory;
+    for (size_t i = 0; i < size; ++i) bytes[i] = 0;
+}
+
+static void copy_bytes(void *destination, const void *source, size_t size) {
+    uint8_t *out = (uint8_t *)destination;
+    const uint8_t *in = (const uint8_t *)source;
+    for (size_t i = 0; i < size; ++i) out[i] = in[i];
+}
+
 static struct window_state *front_window(struct desktop_state *desktop) {
-    return desktop->front_app == DC_APP_SCRIPT ? &desktop->script
-                                               : &desktop->harvester;
+    if (desktop->front_app == DC_APP_SCRIPT) return &desktop->script;
+    if (desktop->front_app == DC_APP_PAINT) return &desktop->paint;
+    return &desktop->harvester;
 }
 
-static int menu_dropdown_contains(const struct desktop_state *desktop, int x,
-                                  int y) {
-    if (desktop->menu_open == 1) {
-        return contains((struct rect){142, 24, 120, 56}, x, y);
+static void ensure_shell_visible(struct desktop_state *desktop) {
+    if (!desktop->harvester.visible && !desktop->script.visible &&
+        !desktop->paint.visible) {
+        desktop->harvester.visible = 1;
+        desktop->front_app = DC_APP_HARVESTER;
     }
-    if (desktop->menu_open == 2) {
-        return contains((struct rect){198, 24, 166, 34}, x, y);
-    }
-    return 0;
 }
 
-static int menubar_opens_menu(int x, int y) {
-    return y < 24 && ((x >= 146 && x < 196) || (x >= 200 && x < 250));
-}
-
-static void dismiss_menu_if_outside(struct desktop_state *desktop, int x, int y) {
-    if (desktop->menu_open && !menu_dropdown_contains(desktop, x, y) &&
-        !menubar_opens_menu(x, y)) {
-        desktop->menu_open = 0;
-    }
+static void bring_app(struct desktop_state *desktop, enum dc_app app) {
+    desktop->front_app = app;
+    if (app == DC_APP_SCRIPT) desktop->script.visible = 1;
+    if (app == DC_APP_PAINT) desktop->paint.visible = 1;
+    if (app == DC_APP_HARVESTER) desktop->harvester.visible = 1;
 }
 
 static void open_script(struct desktop_state *desktop) {
-    desktop->script.visible = 1;
-    desktop->front_app = DC_APP_SCRIPT;
+    bring_app(desktop, DC_APP_SCRIPT);
+}
+
+static void open_paint(struct desktop_state *desktop) {
+    bring_app(desktop, DC_APP_PAINT);
+}
+
+static void open_harvester(struct desktop_state *desktop) {
+    bring_app(desktop, DC_APP_HARVESTER);
+}
+
+static void selection_bounds(const struct desktop_state *desktop, size_t *start,
+                             size_t *end) {
+    size_t a = desktop->sel_anchor;
+    size_t b = desktop->caret;
+    if (a > b) {
+        size_t tmp = a;
+        a = b;
+        b = tmp;
+    }
+    *start = a;
+    *end = b;
+}
+
+static int selection_active(const struct desktop_state *desktop) {
+    size_t start = 0;
+    size_t end = 0;
+    selection_bounds(desktop, &start, &end);
+    return desktop->has_selection && start != end;
+}
+
+static void clear_selection(struct desktop_state *desktop) {
+    desktop->has_selection = 0;
+    desktop->sel_anchor = desktop->caret;
+    desktop->selecting = 0;
+}
+
+static void set_default_document(struct desktop_state *desktop) {
+    const char *welcome =
+        "Digital Caviar\n\n"
+        "A quiet machine with a loud idea:\n"
+        "write, paint, and paste between them.\n\n"
+        "Try Font, Style, and Size.";
+    desktop->document_length = 0;
+    while (welcome[desktop->document_length] &&
+           desktop->document_length < DOCUMENT_CAPACITY) {
+        size_t i = desktop->document_length;
+        desktop->document[i] = welcome[i];
+        desktop->doc_font[i] = DC_FONT_CHICAGO;
+        desktop->doc_style[i] = 0;
+        desktop->doc_size[i] = 1;
+        ++desktop->document_length;
+    }
+    desktop->document[desktop->document_length] = '\0';
+    desktop->caret = desktop->document_length;
+    clear_selection(desktop);
 }
 
 static void save_document(struct desktop_state *desktop) {
@@ -47,39 +114,138 @@ static void save_document(struct desktop_state *desktop) {
     }
 }
 
-static void set_default_document(struct desktop_state *desktop) {
-    const char *welcome =
-        "Digital Caviar\n\n"
-        "A quiet machine.\n"
-        "Move through it deliberately.\n\n"
-        "Open File and choose Save to keep this text.";
-    desktop->document_length = 0;
-    while (welcome[desktop->document_length] &&
-           desktop->document_length < DOCUMENT_CAPACITY) {
-        desktop->document[desktop->document_length] =
-            welcome[desktop->document_length];
-        ++desktop->document_length;
+static void canvas_clear(struct desktop_state *desktop) {
+    zero_bytes(desktop->canvas, sizeof(desktop->canvas));
+}
+
+static void canvas_set(struct desktop_state *desktop, int x, int y, uint8_t on) {
+    if (x < 0 || y < 0 || x >= PAINT_WIDTH || y >= PAINT_HEIGHT) return;
+    desktop->canvas[y * PAINT_WIDTH + x] = on ? 1 : 0;
+}
+
+static uint8_t canvas_get(const struct desktop_state *desktop, int x, int y) {
+    if (x < 0 || y < 0 || x >= PAINT_WIDTH || y >= PAINT_HEIGHT) return 0;
+    return desktop->canvas[y * PAINT_WIDTH + x];
+}
+
+static void canvas_brush(struct desktop_state *desktop, int x, int y, int erase) {
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+            canvas_set(desktop, x + dx, y + dy, erase ? 0 : 1);
+}
+
+static void canvas_line(struct desktop_state *desktop, int x0, int y0, int x1,
+                        int y1, int erase) {
+    int dx = x1 - x0;
+    int dy = y1 - y0;
+    int steps = maxi(maxi(dx < 0 ? -dx : dx, dy < 0 ? -dy : dy), 1);
+    for (int i = 0; i <= steps; ++i) {
+        int x = x0 + dx * i / steps;
+        int y = y0 + dy * i / steps;
+        canvas_brush(desktop, x, y, erase);
     }
-    desktop->document[desktop->document_length] = '\0';
+}
+
+static int pattern_on(int pattern, int x, int y) {
+    static const uint8_t pats[4][8] = {
+        {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+        {0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55},
+        {0x88, 0x22, 0x88, 0x22, 0x88, 0x22, 0x88, 0x22},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+    };
+    pattern = clampi(pattern, 0, 3);
+    return (pats[pattern][y & 7] >> (7 - (x & 7))) & 1;
+}
+
+static void canvas_rect(struct desktop_state *desktop, int x0, int y0, int x1,
+                        int y1, int filled) {
+    int left = mini(x0, x1);
+    int right = maxi(x0, x1);
+    int top = mini(y0, y1);
+    int bottom = maxi(y0, y1);
+    for (int y = top; y <= bottom; ++y) {
+        for (int x = left; x <= right; ++x) {
+            int edge = x == left || x == right || y == top || y == bottom;
+            if (filled) {
+                if (pattern_on(desktop->paint_pattern, x, y))
+                    canvas_set(desktop, x, y, 1);
+            } else if (edge) {
+                canvas_set(desktop, x, y, 1);
+            }
+        }
+    }
+}
+
+static void canvas_oval(struct desktop_state *desktop, int x0, int y0, int x1,
+                        int y1, int filled) {
+    int left = mini(x0, x1);
+    int right = maxi(x0, x1);
+    int top = mini(y0, y1);
+    int bottom = maxi(y0, y1);
+    int cx = (left + right) / 2;
+    int cy = (top + bottom) / 2;
+    int rx = maxi((right - left) / 2, 1);
+    int ry = maxi((bottom - top) / 2, 1);
+    for (int y = top; y <= bottom; ++y) {
+        for (int x = left; x <= right; ++x) {
+            int dx = x - cx;
+            int dy = y - cy;
+            int value = dx * dx * ry * ry + dy * dy * rx * rx;
+            int outer = rx * rx * ry * ry;
+            int inner = (rx - 1) * (rx - 1) * (ry - 1) * (ry - 1);
+            if (filled) {
+                if (value <= outer && pattern_on(desktop->paint_pattern, x, y))
+                    canvas_set(desktop, x, y, 1);
+            } else if (value <= outer && value >= inner) {
+                canvas_set(desktop, x, y, 1);
+            }
+        }
+    }
+}
+
+static struct rect paint_canvas_rect(const struct window_state *window) {
+    return (struct rect){window->frame.x + 78, window->frame.y + 40,
+                         PAINT_WIDTH, PAINT_HEIGHT};
+}
+
+static int map_to_canvas(const struct window_state *window, int x, int y,
+                         int *cx, int *cy) {
+    struct rect canvas = paint_canvas_rect(window);
+    if (!contains(canvas, x, y)) return 0;
+    *cx = x - canvas.x;
+    *cy = y - canvas.y;
+    return 1;
 }
 
 void desktop_init(struct desktop_state *desktop) {
-    uint8_t *bytes = (uint8_t *)desktop;
-    for (size_t i = 0; i < sizeof(*desktop); ++i) {
-        bytes[i] = 0;
-    }
-    desktop->harvester = (struct window_state){{66, 62, 424, 300}, 1};
-    desktop->script = (struct window_state){{190, 112, 374, 280}, 0};
+    zero_bytes(desktop, sizeof(*desktop));
+    desktop->harvester = (struct window_state){{48, 56, 360, 280}, 1};
+    desktop->script = (struct window_state){{170, 70, 420, 320}, 0};
+    desktop->paint = (struct window_state){{70, 50, 460, 360}, 0};
     desktop->front_app = DC_APP_HARVESTER;
     desktop->pointer_x = SCREEN_WIDTH / 2;
     desktop->pointer_y = SCREEN_HEIGHT / 2;
+    desktop->typing_font = DC_FONT_CHICAGO;
+    desktop->typing_style = 0;
+    desktop->typing_size = 1;
+    desktop->tool = PAINT_PENCIL;
+    desktop->paint_pattern = 1;
     desktop->needs_redraw = 1;
+    canvas_clear(desktop);
 
     desktop->storage_status =
         storage_load_document(desktop->document, DOCUMENT_CAPACITY,
                               &desktop->document_length);
     if (desktop->storage_status != STORAGE_LOAD_OK) {
         set_default_document(desktop);
+    } else {
+        for (size_t i = 0; i < desktop->document_length; ++i) {
+            desktop->doc_font[i] = DC_FONT_CHICAGO;
+            desktop->doc_style[i] = 0;
+            desktop->doc_size[i] = 1;
+        }
+        desktop->caret = desktop->document_length;
+        clear_selection(desktop);
     }
 }
 
@@ -104,49 +270,347 @@ static char key_character(uint16_t code, int shift) {
         [43] = '|', [44] = 'Z', [45] = 'X', [46] = 'C', [47] = 'V', [48] = 'B',
         [49] = 'N', [50] = 'M', [51] = '<', [52] = '>', [53] = '?', [57] = ' ',
     };
-    if (code >= sizeof(normal)) {
-        return 0;
-    }
+    if (code >= sizeof(normal)) return 0;
     return shift ? shifted[code] : normal[code];
 }
 
+static void delete_range(struct desktop_state *desktop, size_t start, size_t end) {
+    if (end <= start || end > desktop->document_length) return;
+    size_t count = end - start;
+    for (size_t i = start; i + count < desktop->document_length; ++i) {
+        desktop->document[i] = desktop->document[i + count];
+        desktop->doc_font[i] = desktop->doc_font[i + count];
+        desktop->doc_style[i] = desktop->doc_style[i + count];
+        desktop->doc_size[i] = desktop->doc_size[i + count];
+    }
+    desktop->document_length -= count;
+    desktop->document[desktop->document_length] = '\0';
+    desktop->caret = start;
+    clear_selection(desktop);
+    desktop->document_dirty = 1;
+}
+
+static void insert_char(struct desktop_state *desktop, char character) {
+    if (selection_active(desktop)) {
+        size_t start = 0;
+        size_t end = 0;
+        selection_bounds(desktop, &start, &end);
+        delete_range(desktop, start, end);
+    }
+    if (desktop->document_length >= DOCUMENT_CAPACITY) return;
+    for (size_t i = desktop->document_length; i > desktop->caret; --i) {
+        desktop->document[i] = desktop->document[i - 1];
+        desktop->doc_font[i] = desktop->doc_font[i - 1];
+        desktop->doc_style[i] = desktop->doc_style[i - 1];
+        desktop->doc_size[i] = desktop->doc_size[i - 1];
+    }
+    desktop->document[desktop->caret] = character;
+    desktop->doc_font[desktop->caret] = (uint8_t)desktop->typing_font;
+    desktop->doc_style[desktop->caret] = desktop->typing_style;
+    desktop->doc_size[desktop->caret] = desktop->typing_size;
+    ++desktop->document_length;
+    ++desktop->caret;
+    desktop->document[desktop->document_length] = '\0';
+    clear_selection(desktop);
+    desktop->document_dirty = 1;
+}
+
+static void apply_format_to_selection(struct desktop_state *desktop,
+                                      int set_font, enum dc_font font,
+                                      int set_style, uint8_t style_bits,
+                                      int toggle_style, int set_size,
+                                      uint8_t size) {
+    size_t start = 0;
+    size_t end = 0;
+    if (selection_active(desktop)) {
+        selection_bounds(desktop, &start, &end);
+    } else {
+        desktop->typing_font = set_font ? font : desktop->typing_font;
+        if (set_style) desktop->typing_style = style_bits;
+        if (toggle_style) desktop->typing_style ^= style_bits;
+        if (set_size) desktop->typing_size = size;
+        return;
+    }
+    for (size_t i = start; i < end; ++i) {
+        if (set_font) desktop->doc_font[i] = (uint8_t)font;
+        if (set_style) desktop->doc_style[i] = style_bits;
+        if (toggle_style) desktop->doc_style[i] ^= style_bits;
+        if (set_size) desktop->doc_size[i] = size;
+    }
+    if (set_font) desktop->typing_font = font;
+    if (set_style) desktop->typing_style = style_bits;
+    if (toggle_style) desktop->typing_style ^= style_bits;
+    if (set_size) desktop->typing_size = size;
+    desktop->document_dirty = 1;
+}
+
+static void clipboard_copy_text(struct desktop_state *desktop) {
+    size_t start = 0;
+    size_t end = 0;
+    if (!selection_active(desktop)) return;
+    selection_bounds(desktop, &start, &end);
+    size_t length = end - start;
+    if (length > CLIP_TEXT_CAPACITY) length = CLIP_TEXT_CAPACITY;
+    copy_bytes(desktop->clipboard.text, desktop->document + start, length);
+    desktop->clipboard.text[length] = '\0';
+    desktop->clipboard.text_length = length;
+    desktop->clipboard.kind = CLIP_TEXT;
+}
+
+static void clipboard_cut_text(struct desktop_state *desktop) {
+    size_t start = 0;
+    size_t end = 0;
+    if (!selection_active(desktop)) return;
+    selection_bounds(desktop, &start, &end);
+    clipboard_copy_text(desktop);
+    delete_range(desktop, start, end);
+}
+
+static void clipboard_paste_text(struct desktop_state *desktop) {
+    if (desktop->clipboard.kind != CLIP_TEXT) return;
+    if (selection_active(desktop)) {
+        size_t start = 0;
+        size_t end = 0;
+        selection_bounds(desktop, &start, &end);
+        delete_range(desktop, start, end);
+    }
+    for (size_t i = 0; i < desktop->clipboard.text_length; ++i) {
+        insert_char(desktop, desktop->clipboard.text[i]);
+    }
+}
+
+static void clipboard_copy_paint(struct desktop_state *desktop) {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = PAINT_WIDTH - 1;
+    int y1 = PAINT_HEIGHT - 1;
+    if (desktop->has_marquee) {
+        x0 = mini(desktop->marquee_x0, desktop->marquee_x1);
+        y0 = mini(desktop->marquee_y0, desktop->marquee_y1);
+        x1 = maxi(desktop->marquee_x0, desktop->marquee_x1);
+        y1 = maxi(desktop->marquee_y0, desktop->marquee_y1);
+    }
+    int width = x1 - x0 + 1;
+    int height = y1 - y0 + 1;
+    if (width < 1 || height < 1) return;
+    if (width > PAINT_WIDTH) width = PAINT_WIDTH;
+    if (height > PAINT_HEIGHT) height = PAINT_HEIGHT;
+    zero_bytes(desktop->clipboard.image, sizeof(desktop->clipboard.image));
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            desktop->clipboard.image[y * PAINT_WIDTH + x] =
+                canvas_get(desktop, x0 + x, y0 + y);
+    desktop->clipboard.image_width = width;
+    desktop->clipboard.image_height = height;
+    desktop->clipboard.kind = CLIP_IMAGE;
+}
+
+static void clipboard_paste_into_script(struct desktop_state *desktop) {
+    if (desktop->clipboard.kind == CLIP_TEXT) {
+        clipboard_paste_text(desktop);
+        return;
+    }
+    if (desktop->clipboard.kind != CLIP_IMAGE) return;
+    zero_bytes(desktop->embed_image, sizeof(desktop->embed_image));
+    for (int y = 0; y < desktop->clipboard.image_height; ++y)
+        for (int x = 0; x < desktop->clipboard.image_width; ++x)
+            desktop->embed_image[y * PAINT_WIDTH + x] =
+                desktop->clipboard.image[y * PAINT_WIDTH + x];
+    desktop->embed_width = desktop->clipboard.image_width;
+    desktop->embed_height = desktop->clipboard.image_height;
+    desktop->embed_valid = 1;
+    desktop->document_dirty = 1;
+    if (desktop->document_length + 8 < DOCUMENT_CAPACITY) {
+        const char *marker = "\n[PICTURE]\n";
+        for (int i = 0; marker[i]; ++i) insert_char(desktop, marker[i]);
+    }
+}
+
+static void clipboard_paste_into_paint(struct desktop_state *desktop) {
+    if (desktop->clipboard.kind != CLIP_IMAGE) return;
+    int ox = 12;
+    int oy = 12;
+    for (int y = 0; y < desktop->clipboard.image_height; ++y)
+        for (int x = 0; x < desktop->clipboard.image_width; ++x)
+            if (desktop->clipboard.image[y * PAINT_WIDTH + x])
+                canvas_set(desktop, ox + x, oy + y, 1);
+}
+
 static void handle_key(struct desktop_state *desktop, uint16_t code,
-                      int32_t value) {
+                       int32_t value) {
     if (code == 42 || code == 54) {
         desktop->shift_down = value != 0;
         return;
     }
-    if (value == 0 || !desktop->script.visible ||
-        desktop->front_app != DC_APP_SCRIPT || desktop->about_open) {
-        return;
-    }
+    if (value == 0 || desktop->about_open) return;
+    if (desktop->front_app != DC_APP_SCRIPT || !desktop->script.visible) return;
 
     desktop->save_notice = 0;
-    size_t before = desktop->document_length;
-
     if (code == 14) {
-        if (desktop->document_length) {
-            --desktop->document_length;
-            desktop->document[desktop->document_length] = '\0';
+        if (selection_active(desktop)) {
+            size_t start = 0;
+            size_t end = 0;
+            selection_bounds(desktop, &start, &end);
+            delete_range(desktop, start, end);
+        } else if (desktop->caret > 0) {
+            delete_range(desktop, desktop->caret - 1, desktop->caret);
         }
-    } else if (code == 28) {
-        if (desktop->document_length < DOCUMENT_CAPACITY) {
-            desktop->document[desktop->document_length++] = '\n';
-            desktop->document[desktop->document_length] = '\0';
-        }
-    } else {
-        char character = key_character(code, desktop->shift_down);
-        if (character && desktop->document_length < DOCUMENT_CAPACITY) {
-            desktop->document[desktop->document_length++] = character;
-            desktop->document[desktop->document_length] = '\0';
-        } else {
-            return;
-        }
+        return;
     }
+    if (code == 28) {
+        insert_char(desktop, '\n');
+        return;
+    }
+    if (code == 105 && desktop->caret > 0) { /* left */
+        --desktop->caret;
+        if (!desktop->shift_down) clear_selection(desktop);
+        else desktop->has_selection = 1;
+        return;
+    }
+    if (code == 106 && desktop->caret < desktop->document_length) { /* right */
+        ++desktop->caret;
+        if (!desktop->shift_down) clear_selection(desktop);
+        else desktop->has_selection = 1;
+        return;
+    }
+    char character = key_character(code, desktop->shift_down);
+    if (character) insert_char(desktop, character);
+}
 
-    if (desktop->document_length != before) {
-        desktop->document_dirty = 1;
+static int menu_bar_index(int x, int y) {
+    if (y >= 24) return MENU_NONE;
+    if (x >= 148 && x < 190) return MENU_FILE;
+    if (x >= 196 && x < 240) return MENU_EDIT;
+    if (x >= 246 && x < 292) return MENU_FONT;
+    if (x >= 298 && x < 350) return MENU_STYLE;
+    if (x >= 356 && x < 402) return MENU_SIZE;
+    if (x >= 408 && x < 456) return MENU_VIEW;
+    return MENU_NONE;
+}
+
+static struct rect menu_frame(enum menu_id menu) {
+    switch (menu) {
+    case MENU_FILE:
+        return (struct rect){148, 24, 120, 84};
+    case MENU_EDIT:
+        return (struct rect){196, 24, 120, 84};
+    case MENU_FONT:
+        return (struct rect){246, 24, 120, 84};
+    case MENU_STYLE:
+        return (struct rect){298, 24, 130, 84};
+    case MENU_SIZE:
+        return (struct rect){356, 24, 100, 56};
+    case MENU_VIEW:
+        return (struct rect){408, 24, 150, 34};
+    default:
+        return (struct rect){0, 0, 0, 0};
     }
+}
+
+static void handle_menu_command(struct desktop_state *desktop, enum menu_id menu,
+                                int item) {
+    if (menu == MENU_FILE) {
+        if (item == 0) { /* Save */
+            if (desktop->front_app == DC_APP_SCRIPT) save_document(desktop);
+        } else if (item == 1) { /* Close */
+            struct window_state *window = front_window(desktop);
+            window->visible = 0;
+            if (desktop->script.visible) desktop->front_app = DC_APP_SCRIPT;
+            else if (desktop->paint.visible) desktop->front_app = DC_APP_PAINT;
+            else {
+                desktop->harvester.visible = 1;
+                desktop->front_app = DC_APP_HARVESTER;
+            }
+        } else if (item == 2) { /* New Paint page / clear */
+            if (desktop->front_app == DC_APP_PAINT) canvas_clear(desktop);
+            else if (desktop->front_app == DC_APP_SCRIPT) {
+                desktop->document_length = 0;
+                desktop->document[0] = '\0';
+                desktop->caret = 0;
+                desktop->embed_valid = 0;
+                clear_selection(desktop);
+                desktop->document_dirty = 1;
+            }
+        }
+    } else if (menu == MENU_EDIT) {
+        if (desktop->front_app == DC_APP_SCRIPT) {
+            if (item == 0) clipboard_cut_text(desktop);
+            else if (item == 1) clipboard_copy_text(desktop);
+            else if (item == 2) clipboard_paste_into_script(desktop);
+        } else if (desktop->front_app == DC_APP_PAINT) {
+            if (item == 1) clipboard_copy_paint(desktop);
+            else if (item == 2) clipboard_paste_into_paint(desktop);
+        }
+    } else if (menu == MENU_FONT) {
+        apply_format_to_selection(desktop, 1, (enum dc_font)item, 0, 0, 0, 0, 0);
+    } else if (menu == MENU_STYLE) {
+        if (item == 0)
+            apply_format_to_selection(desktop, 0, 0, 1, 0, 0, 0, 0);
+        else if (item == 1)
+            apply_format_to_selection(desktop, 0, 0, 0, DC_STYLE_BOLD, 1, 0, 0);
+        else if (item == 2)
+            apply_format_to_selection(desktop, 0, 0, 0, DC_STYLE_UNDERLINE, 1, 0,
+                                     0);
+    } else if (menu == MENU_SIZE) {
+        apply_format_to_selection(desktop, 0, 0, 0, 0, 0, 1, item == 0 ? 1 : 2);
+    } else if (menu == MENU_VIEW) {
+        desktop->about_open = 1;
+    }
+}
+
+static int hit_menu_item(enum menu_id menu, int x, int y) {
+    struct rect frame = menu_frame(menu);
+    if (!contains(frame, x, y)) return -1;
+    return (y - frame.y) / 28;
+}
+
+static struct rect script_text_rect(const struct window_state *window) {
+    return (struct rect){window->frame.x + 18, window->frame.y + 40,
+                         window->frame.width - 36, window->frame.height - 100};
+}
+
+static size_t hit_test_document(const struct desktop_state *desktop, int x,
+                                int y) {
+    struct rect area = script_text_rect(&desktop->script);
+    int cursor_x = area.x;
+    int cursor_y = area.y;
+    int right = area.x + area.width;
+    int bottom = area.y + area.height;
+    size_t best = desktop->document_length;
+    for (size_t i = 0; i < desktop->document_length; ++i) {
+        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
+        int advance = gfx_font_advance((enum dc_font)desktop->doc_font[i], scale);
+        int height = gfx_font_height(scale);
+        char value = desktop->document[i];
+        if (value == '\n' || cursor_x + advance > right) {
+            cursor_x = area.x;
+            cursor_y += height + 2;
+            if (value == '\n') {
+                if (y < cursor_y) return i;
+                continue;
+            }
+        }
+        if (cursor_y + height >= bottom) break;
+        if (y >= cursor_y && y < cursor_y + height && x >= cursor_x &&
+            x < cursor_x + advance) {
+            return i + (x > cursor_x + advance / 2 ? 1 : 0);
+        }
+        cursor_x += advance;
+        best = i + 1;
+    }
+    return best;
+}
+
+static void close_window(struct desktop_state *desktop,
+                         struct window_state *window) {
+    window->visible = 0;
+    if (desktop->script.visible) desktop->front_app = DC_APP_SCRIPT;
+    else if (desktop->paint.visible) desktop->front_app = DC_APP_PAINT;
+    else {
+        desktop->harvester.visible = 1;
+        desktop->front_app = DC_APP_HARVESTER;
+    }
+    ensure_shell_visible(desktop);
 }
 
 static void handle_press(struct desktop_state *desktop, int x, int y) {
@@ -159,65 +623,63 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
         return;
     }
 
-    dismiss_menu_if_outside(desktop, x, y);
+    if (desktop->menu_open != MENU_NONE) {
+        int item = hit_menu_item(desktop->menu_open, x, y);
+        if (item >= 0) {
+            handle_menu_command(desktop, desktop->menu_open, item);
+            desktop->menu_open = MENU_NONE;
+            return;
+        }
+        enum menu_id again = menu_bar_index(x, y);
+        if (again != MENU_NONE) {
+            desktop->menu_open = again;
+            return;
+        }
+        desktop->menu_open = MENU_NONE;
+    }
 
     if (y < 24) {
-        if (x >= 146 && x < 196) {
-            desktop->menu_open = 1;
-        } else if (x >= 200 && x < 250) {
-            desktop->menu_open = 2;
-        } else {
-            desktop->menu_open = 0;
-        }
+        desktop->menu_open = menu_bar_index(x, y);
         return;
     }
 
-    if (desktop->menu_open == 1) {
-        if (contains((struct rect){142, 24, 120, 28}, x, y)) {
-            save_document(desktop);
-        } else if (contains((struct rect){142, 52, 120, 28}, x, y) &&
-                   desktop->front_app == DC_APP_SCRIPT) {
-            desktop->script.visible = 0;
-            desktop->front_app = DC_APP_HARVESTER;
-        }
-        desktop->menu_open = 0;
+    /* Desktop icons */
+    if (contains((struct rect){24, 48, 70, 70}, x, y)) {
+        open_harvester(desktop);
         return;
     }
-    if (desktop->menu_open == 2) {
-        if (contains((struct rect){198, 24, 166, 34}, x, y)) {
-            desktop->about_open = 1;
-        }
-        desktop->menu_open = 0;
+    if (contains((struct rect){24, 130, 70, 70}, x, y)) {
+        open_script(desktop);
         return;
     }
-
-    if (contains((struct rect){520, 390, 90, 60}, x, y)) {
+    if (contains((struct rect){24, 212, 70, 70}, x, y)) {
+        open_paint(desktop);
+        return;
+    }
+    if (contains((struct rect){540, 390, 80, 70}, x, y)) {
         open_script(desktop);
         return;
     }
 
-    enum dc_app order[2] = {
-        desktop->front_app,
-        desktop->front_app == DC_APP_SCRIPT ? DC_APP_HARVESTER : DC_APP_SCRIPT,
-    };
-    for (int index = 0; index < 2; ++index) {
+    enum dc_app order[3] = {desktop->front_app, DC_APP_SCRIPT, DC_APP_PAINT};
+    order[1] = desktop->front_app == DC_APP_HARVESTER ? DC_APP_SCRIPT
+                                                      : DC_APP_HARVESTER;
+    order[2] = desktop->front_app == DC_APP_PAINT ? DC_APP_SCRIPT : DC_APP_PAINT;
+    if (order[1] == order[2]) order[2] = DC_APP_HARVESTER;
+
+    for (int index = 0; index < 3; ++index) {
         enum dc_app app = order[index];
         struct window_state *window =
-            app == DC_APP_SCRIPT ? &desktop->script : &desktop->harvester;
-        if (!window->visible || !contains(window->frame, x, y)) {
-            continue;
-        }
+            app == DC_APP_SCRIPT
+                ? &desktop->script
+                : (app == DC_APP_PAINT ? &desktop->paint : &desktop->harvester);
+        if (!window->visible || !contains(window->frame, x, y)) continue;
+
         desktop->front_app = app;
         if (contains((struct rect){window->frame.x + 10, window->frame.y + 9, 10,
                                    10},
                      x, y)) {
-            window->visible = 0;
-            if (desktop->script.visible) {
-                desktop->front_app = DC_APP_SCRIPT;
-            } else {
-                desktop->harvester.visible = 1;
-                desktop->front_app = DC_APP_HARVESTER;
-            }
+            close_window(desktop, window);
             return;
         }
         if (y < window->frame.y + 28) {
@@ -226,18 +688,108 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
             desktop->drag_offset_y = y - window->frame.y;
             return;
         }
-        if (app == DC_APP_HARVESTER &&
-            contains((struct rect){window->frame.x + 22, window->frame.y + 116,
-                                   170, 42},
-                     x, y)) {
-            open_script(desktop);
+
+        if (app == DC_APP_HARVESTER) {
+            if (contains((struct rect){window->frame.x + 22, window->frame.y + 56,
+                                       150, 40},
+                         x, y)) {
+                open_harvester(desktop);
+            } else if (contains((struct rect){window->frame.x + 22,
+                                              window->frame.y + 110, 150, 40},
+                                x, y)) {
+                open_script(desktop);
+            } else if (contains((struct rect){window->frame.x + 22,
+                                              window->frame.y + 164, 150, 40},
+                                x, y)) {
+                open_paint(desktop);
+            }
+            return;
+        }
+
+        if (app == DC_APP_SCRIPT) {
+            struct rect text = script_text_rect(window);
+            if (contains(text, x, y)) {
+                size_t index_hit = hit_test_document(desktop, x, y);
+                desktop->caret = clampi((int)index_hit, 0,
+                                        (int)desktop->document_length);
+                desktop->sel_anchor = desktop->caret;
+                desktop->selecting = 1;
+                desktop->has_selection = 0;
+            }
+            return;
+        }
+
+        if (app == DC_APP_PAINT) {
+            /* Tool palette */
+            int tool_x = window->frame.x + 12;
+            int tool_y = window->frame.y + 40;
+            for (int tool = 0; tool < 6; ++tool) {
+                if (contains((struct rect){tool_x, tool_y + tool * 28, 54, 24},
+                             x, y)) {
+                    desktop->tool = (enum paint_tool)tool;
+                    return;
+                }
+            }
+            for (int pat = 0; pat < 4; ++pat) {
+                if (contains((struct rect){tool_x, tool_y + 180 + pat * 18, 54,
+                                           16},
+                             x, y)) {
+                    desktop->paint_pattern = pat;
+                    return;
+                }
+            }
+            int cx = 0;
+            int cy = 0;
+            if (map_to_canvas(window, x, y, &cx, &cy)) {
+                desktop->stroke_active = 1;
+                desktop->stroke_x0 = cx;
+                desktop->stroke_y0 = cy;
+                desktop->stroke_x1 = cx;
+                desktop->stroke_y1 = cy;
+                if (desktop->tool == PAINT_PENCIL)
+                    canvas_brush(desktop, cx, cy, 0);
+                else if (desktop->tool == PAINT_ERASER)
+                    canvas_brush(desktop, cx, cy, 1);
+                else if (desktop->tool == PAINT_SELECT) {
+                    desktop->has_marquee = 1;
+                    desktop->marquee_x0 = cx;
+                    desktop->marquee_y0 = cy;
+                    desktop->marquee_x1 = cx;
+                    desktop->marquee_y1 = cy;
+                }
+            }
+            return;
         }
         return;
     }
+}
 
-    if (contains((struct rect){32, 128, 100, 46}, x, y)) {
-        open_script(desktop);
+static void handle_drag_paint(struct desktop_state *desktop, int x, int y) {
+    int cx = 0;
+    int cy = 0;
+    if (!map_to_canvas(&desktop->paint, x, y, &cx, &cy)) return;
+    desktop->stroke_x1 = cx;
+    desktop->stroke_y1 = cy;
+    if (desktop->tool == PAINT_PENCIL) canvas_brush(desktop, cx, cy, 0);
+    else if (desktop->tool == PAINT_ERASER) canvas_brush(desktop, cx, cy, 1);
+    else if (desktop->tool == PAINT_SELECT) {
+        desktop->marquee_x1 = cx;
+        desktop->marquee_y1 = cy;
     }
+}
+
+static void finish_paint_stroke(struct desktop_state *desktop) {
+    if (!desktop->stroke_active) return;
+    if (desktop->tool == PAINT_LINE)
+        canvas_line(desktop, desktop->stroke_x0, desktop->stroke_y0,
+                    desktop->stroke_x1, desktop->stroke_y1, 0);
+    else if (desktop->tool == PAINT_RECT)
+        canvas_rect(desktop, desktop->stroke_x0, desktop->stroke_y0,
+                    desktop->stroke_x1, desktop->stroke_y1, 1);
+    else if (desktop->tool == PAINT_OVAL)
+        canvas_oval(desktop, desktop->stroke_x0, desktop->stroke_y0,
+                    desktop->stroke_x1, desktop->stroke_y1, 1);
+    desktop->stroke_active = 0;
 }
 
 void desktop_handle_event(struct desktop_state *desktop,
@@ -249,18 +801,15 @@ void desktop_handle_event(struct desktop_state *desktop,
             struct window_state *window = front_window(desktop);
             window->frame.x = event->x - desktop->drag_offset_x;
             window->frame.y = event->y - desktop->drag_offset_y;
-            if (window->frame.x < 8) {
-                window->frame.x = 8;
-            }
-            if (window->frame.y < 25) {
-                window->frame.y = 25;
-            }
-            if (window->frame.x + window->frame.width > SCREEN_WIDTH - 8) {
-                window->frame.x = SCREEN_WIDTH - 8 - window->frame.width;
-            }
-            if (window->frame.y + window->frame.height > SCREEN_HEIGHT - 8) {
-                window->frame.y = SCREEN_HEIGHT - 8 - window->frame.height;
-            }
+            window->frame.x = clampi(window->frame.x, 8,
+                                     SCREEN_WIDTH - 8 - window->frame.width);
+            window->frame.y = clampi(window->frame.y, 25,
+                                     SCREEN_HEIGHT - 8 - window->frame.height);
+        } else if (desktop->selecting && desktop->front_app == DC_APP_SCRIPT) {
+            desktop->caret = hit_test_document(desktop, event->x, event->y);
+            desktop->has_selection = desktop->caret != desktop->sel_anchor;
+        } else if (desktop->stroke_active && desktop->front_app == DC_APP_PAINT) {
+            handle_drag_paint(desktop, event->x, event->y);
         }
     } else if (event->kind == DC_EVENT_POINTER_BUTTON) {
         desktop->pointer_x = event->x;
@@ -268,8 +817,25 @@ void desktop_handle_event(struct desktop_state *desktop,
         desktop->pointer_down = event->value != 0;
         if (event->value == 1) {
             handle_press(desktop, event->x, event->y);
-        } else if (event->value == 0) {
+        } else {
             desktop->dragging = 0;
+            desktop->selecting = 0;
+            if (desktop->stroke_active && desktop->paint.visible) {
+                int cx = 0;
+                int cy = 0;
+                if (map_to_canvas(&desktop->paint, event->x, event->y, &cx,
+                                  &cy)) {
+                    desktop->stroke_x1 = cx;
+                    desktop->stroke_y1 = cy;
+                    if (desktop->tool == PAINT_PENCIL ||
+                        desktop->tool == PAINT_ERASER) {
+                        canvas_line(desktop, desktop->stroke_x0,
+                                    desktop->stroke_y0, cx, cy,
+                                    desktop->tool == PAINT_ERASER);
+                    }
+                }
+            }
+            finish_paint_stroke(desktop);
         }
     } else if (event->kind == DC_EVENT_KEY) {
         handle_key(desktop, event->code, event->value);
@@ -287,8 +853,14 @@ static void draw_window_frame(const struct window_state *window,
     gfx_fill(frame, active ? DC_SURFACE : DC_DIM);
     gfx_fill((struct rect){frame.x, frame.y, frame.width, 28},
              active ? DC_DIM : DC_SHADOW);
+    if (active) {
+        for (int stripe = 6; stripe < 22; stripe += 2) {
+            gfx_hline(frame.x + 28, frame.y + stripe, frame.width - 40, DC_SHADOW);
+        }
+    }
     gfx_fill((struct rect){frame.x, frame.y + 27, frame.width, 1}, DC_INK);
     gfx_fill((struct rect){frame.x + 10, frame.y + 9, 9, 9}, DC_INK);
+    gfx_fill((struct rect){frame.x + 12, frame.y + 11, 5, 5}, DC_SURFACE);
     gfx_text(frame.x + 35, frame.y + 10, title, active ? DC_INK : DC_SURFACE, 1);
 }
 
@@ -299,79 +871,203 @@ static void draw_harvester(const struct desktop_state *desktop, int active) {
     int y = window->frame.y + 52;
     gfx_icon(x, y, DC_INK, 0);
     gfx_text(x + 38, y + 9, "SYSTEM", DC_INK, 1);
-    gfx_icon(x, y + 58, DC_BREAK, 1);
-    gfx_text(x + 38, y + 67, "NOTES", DC_INK, 1);
-    gfx_text(window->frame.x + 250, window->frame.y + 250,
+    gfx_icon(x, y + 54, DC_BREAK, 1);
+    gfx_text(x + 38, y + 63, "SCRIPT", DC_INK, 1);
+    gfx_paint_icon(x, y + 108, DC_INK);
+    gfx_text(x + 38, y + 117, "PAINT", DC_INK, 1);
+    gfx_text(window->frame.x + 210, window->frame.y + 240,
              storage_available() ? "DISK PRESENT" : "MEMORY ONLY", DC_SHADOW, 1);
 }
 
-static void draw_document(const struct desktop_state *desktop, int x, int y,
-                          int width, int height) {
-    int cursor_x = x;
-    int cursor_y = y;
-    int right = x + width;
-    int bottom = y + height;
+static void draw_document(const struct desktop_state *desktop) {
+    struct rect area = script_text_rect(&desktop->script);
+    int cursor_x = area.x;
+    int cursor_y = area.y;
+    int right = area.x + area.width;
+    int bottom = area.y + area.height;
+    size_t sel_start = 0;
+    size_t sel_end = 0;
+    selection_bounds(desktop, &sel_start, &sel_end);
     char text[2] = {0, 0};
-    for (size_t i = 0; i < desktop->document_length && cursor_y + 7 < bottom; ++i) {
+
+    for (size_t i = 0; i < desktop->document_length && cursor_y + 8 < bottom; ++i) {
+        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
+        enum dc_font font = (enum dc_font)desktop->doc_font[i];
+        int advance = gfx_font_advance(font, scale);
+        int height = gfx_font_height(scale);
         char value = desktop->document[i];
-        if (value == '\n' || cursor_x + 6 > right) {
-            cursor_x = x;
-            cursor_y += 11;
-            if (value == '\n') {
-                continue;
-            }
+        if (value == '\n' || cursor_x + advance > right) {
+            cursor_x = area.x;
+            cursor_y += height + 2;
+            if (value == '\n') continue;
+        }
+        int selected = desktop->has_selection && i >= sel_start && i < sel_end;
+        if (selected) {
+            gfx_fill((struct rect){cursor_x, cursor_y, advance, height}, DC_SELECT);
         }
         text[0] = value;
-        gfx_text(cursor_x, cursor_y, text, DC_INK, 1);
-        cursor_x += 6;
+        gfx_text_font(cursor_x, cursor_y, text, selected ? DC_SURFACE : DC_INK,
+                      scale, font, desktop->doc_style[i]);
+        if (i + 1 == desktop->caret ||
+            (desktop->caret == desktop->document_length &&
+             i + 1 == desktop->document_length && !desktop->has_selection)) {
+            /* caret after this glyph drawn below */
+        }
+        cursor_x += advance;
     }
-    if (cursor_y + 8 < bottom) {
-        gfx_fill((struct rect){cursor_x, cursor_y, 1, 8}, DC_INK);
+
+    /* caret */
+    int caret_x = area.x;
+    int caret_y = area.y;
+    for (size_t i = 0; i < desktop->caret && i < desktop->document_length; ++i) {
+        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
+        int advance =
+            gfx_font_advance((enum dc_font)desktop->doc_font[i], scale);
+        int height = gfx_font_height(scale);
+        char value = desktop->document[i];
+        if (value == '\n' || caret_x + advance > right) {
+            caret_x = area.x;
+            caret_y += height + 2;
+            if (value == '\n') continue;
+        }
+        caret_x += advance;
+    }
+    if (!desktop->has_selection && caret_y + 8 < bottom) {
+        int scale = desktop->typing_size ? desktop->typing_size : 1;
+        gfx_fill((struct rect){caret_x, caret_y, 1, gfx_font_height(scale)},
+                 DC_INK);
+    }
+
+    if (desktop->embed_valid) {
+        int image_y = area.y + area.height - desktop->embed_height - 8;
+        if (image_y < cursor_y + 16) {
+            image_y = mini(bottom - desktop->embed_height - 4, cursor_y + 16);
+        }
+        if (image_y + desktop->embed_height <= bottom) {
+            gfx_text(area.x, image_y - 12, "PASTED PICTURE", DC_SHADOW, 1);
+            gfx_bitmap(area.x, image_y, desktop->embed_image, desktop->embed_width,
+                       desktop->embed_height, DC_INK, DC_SURFACE, 1);
+            gfx_rect_outline((struct rect){area.x, image_y, desktop->embed_width,
+                                           desktop->embed_height},
+                             DC_SHADOW);
+        }
     }
 }
 
 static void draw_script(const struct desktop_state *desktop, int active) {
     const struct window_state *window = &desktop->script;
-    draw_window_frame(window, desktop->document_dirty ? "SCRIPT -" : "SCRIPT",
+    draw_window_frame(window, desktop->document_dirty ? "SCRIPT *" : "SCRIPT",
                       active);
-    int margin = 24;
-    draw_document(desktop, window->frame.x + margin, window->frame.y + 52,
-                  window->frame.width - margin * 2,
-                  window->frame.height - 72);
+    gfx_fill(script_text_rect(window), DC_SURFACE);
+    draw_document(desktop);
+    gfx_text(window->frame.x + 18, window->frame.y + window->frame.height - 22,
+             "FONT / STYLE / SIZE IN MENU", DC_SHADOW, 1);
+}
+
+static void draw_paint(const struct desktop_state *desktop, int active) {
+    const struct window_state *window = &desktop->paint;
+    draw_window_frame(window, "PAINT", active);
+    int tool_x = window->frame.x + 12;
+    int tool_y = window->frame.y + 40;
+    const char *names[6] = {"PENCIL", "ERASER", "LINE", "RECT", "OVAL", "SELECT"};
+    for (int tool = 0; tool < 6; ++tool) {
+        int selected = desktop->tool == (enum paint_tool)tool;
+        gfx_fill((struct rect){tool_x, tool_y + tool * 28, 54, 24},
+                 selected ? DC_ACCENT : DC_DIM);
+        gfx_text(tool_x + 4, tool_y + tool * 28 + 8, names[tool],
+                 selected ? DC_SURFACE : DC_INK, 1);
+    }
+    for (int pat = 0; pat < 4; ++pat) {
+        struct rect swatch = {tool_x, tool_y + 180 + pat * 18, 54, 16};
+        gfx_fill(swatch, DC_SURFACE);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 54; ++x)
+                if (pattern_on(pat, x, y))
+                    gfx_fill((struct rect){swatch.x + x, swatch.y + y, 1, 1},
+                             DC_INK);
+        if (desktop->paint_pattern == pat) gfx_rect_outline(swatch, DC_BREAK);
+    }
+
+    struct rect canvas = paint_canvas_rect(window);
+    gfx_fill(canvas, DC_SURFACE);
+    gfx_bitmap(canvas.x, canvas.y, desktop->canvas, PAINT_WIDTH, PAINT_HEIGHT,
+               DC_INK, DC_SURFACE, 1);
+    gfx_rect_outline(canvas, DC_INK);
+
+    if (desktop->stroke_active &&
+        (desktop->tool == PAINT_LINE || desktop->tool == PAINT_RECT ||
+         desktop->tool == PAINT_OVAL || desktop->tool == PAINT_SELECT)) {
+        int x0 = canvas.x + mini(desktop->stroke_x0, desktop->stroke_x1);
+        int y0 = canvas.y + mini(desktop->stroke_y0, desktop->stroke_y1);
+        int x1 = canvas.x + maxi(desktop->stroke_x0, desktop->stroke_x1);
+        int y1 = canvas.y + maxi(desktop->stroke_y0, desktop->stroke_y1);
+        gfx_rect_outline((struct rect){x0, y0, x1 - x0 + 1, y1 - y0 + 1},
+                         DC_BREAK);
+    } else if (desktop->has_marquee) {
+        int x0 = canvas.x + mini(desktop->marquee_x0, desktop->marquee_x1);
+        int y0 = canvas.y + mini(desktop->marquee_y0, desktop->marquee_y1);
+        int x1 = canvas.x + maxi(desktop->marquee_x0, desktop->marquee_x1);
+        int y1 = canvas.y + maxi(desktop->marquee_y0, desktop->marquee_y1);
+        gfx_rect_outline((struct rect){x0, y0, x1 - x0 + 1, y1 - y0 + 1},
+                         DC_ACCENT);
+    }
 }
 
 static void draw_menu(const struct desktop_state *desktop) {
-    if (desktop->menu_open == 1) {
-        gfx_fill((struct rect){142, 24, 120, 56}, DC_SURFACE);
-        gfx_fill((struct rect){142, 24, 1, 56}, DC_SHADOW);
-        gfx_text(158, 35, "SAVE", DC_INK, 1);
-        gfx_text(158, 63, "CLOSE", DC_INK, 1);
-    } else if (desktop->menu_open == 2) {
-        gfx_fill((struct rect){198, 24, 166, 34}, DC_SURFACE);
-        gfx_text(212, 37, "ACKNOWLEDGMENT", DC_INK, 1);
+    if (desktop->menu_open == MENU_NONE) return;
+    struct rect frame = menu_frame(desktop->menu_open);
+    gfx_fill(frame, DC_SURFACE);
+    gfx_rect_outline(frame, DC_SHADOW);
+    if (desktop->menu_open == MENU_FILE) {
+        gfx_text(frame.x + 12, frame.y + 10, "SAVE", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 38, "CLOSE", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 66, "NEW", DC_INK, 1);
+    } else if (desktop->menu_open == MENU_EDIT) {
+        gfx_text(frame.x + 12, frame.y + 10, "CUT", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 38, "COPY", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 66, "PASTE", DC_INK, 1);
+    } else if (desktop->menu_open == MENU_FONT) {
+        gfx_text(frame.x + 12, frame.y + 10, "CHICAGO", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 38, "GENEVA", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 66, "LONDON", DC_INK, 1);
+    } else if (desktop->menu_open == MENU_STYLE) {
+        gfx_text(frame.x + 12, frame.y + 10, "PLAIN", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 38, "BOLD", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 66, "UNDERLINE", DC_INK, 1);
+    } else if (desktop->menu_open == MENU_SIZE) {
+        gfx_text(frame.x + 12, frame.y + 10, "12 POINT", DC_INK, 1);
+        gfx_text(frame.x + 12, frame.y + 38, "18 POINT", DC_INK, 1);
+    } else if (desktop->menu_open == MENU_VIEW) {
+        gfx_text(frame.x + 12, frame.y + 10, "ACKNOWLEDGMENT", DC_INK, 1);
     }
 }
 
 static void draw_about(void) {
-    struct rect dialog = {188, 152, 272, 182};
+    struct rect dialog = {168, 140, 304, 200};
     gfx_dither((struct rect){dialog.x + 9, dialog.y + 10, dialog.width,
                              dialog.height},
                DC_SHADOW, DC_VOID, 40);
     gfx_fill(dialog, DC_SURFACE);
-    gfx_text(220, 184, "DIGITAL CAVIAR", DC_INK, 2);
-    gfx_text(220, 226, "VERSION 1.0", DC_SHADOW, 1);
-    gfx_text(220, 250, "A QUIET MACHINE FOR ARM64", DC_INK, 1);
+    gfx_text(190, 168, "DIGITAL CAVIAR", DC_INK, 2);
+    gfx_text(190, 206, "VERSION 1.1  BCS DEMO", DC_SHADOW, 1);
+    gfx_text(190, 230, "WRITE  PAINT  CLIPBOARD", DC_INK, 1);
+    gfx_text(190, 252, "FONTS LIKE THE 1984 MAC", DC_INK, 1);
     gfx_fill((struct rect){360, 305, 84, 26}, DC_ACCENT);
     gfx_text(380, 315, "DISMISS", DC_SURFACE, 1);
 }
 
 static void draw_storage_status(const struct desktop_state *desktop) {
     if (desktop->save_notice) {
-        gfx_text(24, 452, desktop->save_notice > 0 ? "SAVED" : "SAVE UNAVAILABLE",
+        gfx_text(24, 452,
+                 desktop->save_notice > 0 ? "SAVED" : "SAVE UNAVAILABLE",
                  desktop->save_notice > 0 ? DC_ACCENT : DC_BREAK, 1);
         return;
     }
-    if (desktop->storage_status == STORAGE_LOAD_CORRUPT) {
+    if (desktop->clipboard.kind == CLIP_IMAGE) {
+        gfx_text(24, 452, "CLIPBOARD: PICTURE", DC_ACCENT, 1);
+    } else if (desktop->clipboard.kind == CLIP_TEXT) {
+        gfx_text(24, 452, "CLIPBOARD: TEXT", DC_ACCENT, 1);
+    } else if (desktop->storage_status == STORAGE_LOAD_CORRUPT) {
         gfx_text(24, 452, "STORAGE CORRUPT", DC_BREAK, 1);
     } else if (desktop->storage_status == STORAGE_LOAD_NO_MEDIA) {
         gfx_text(24, 452, "NO STORAGE", DC_DIM, 1);
@@ -382,38 +1078,65 @@ void desktop_render(const struct desktop_state *desktop) {
     graphics_begin();
     gfx_fill((struct rect){0, 0, SCREEN_WIDTH, 24}, DC_DEEP);
     gfx_fill((struct rect){0, 23, SCREEN_WIDTH, 1}, DC_SHADOW);
-    gfx_text(20, 8,
-             desktop->front_app == DC_APP_SCRIPT ? "SCRIPT" : "DIGITAL CAVIAR",
-             DC_SURFACE, 1);
+
+    const char *brand = "DIGITAL CAVIAR";
+    if (desktop->front_app == DC_APP_SCRIPT) brand = "SCRIPT";
+    else if (desktop->front_app == DC_APP_PAINT) brand = "PAINT";
+    gfx_text(16, 8, brand, DC_SURFACE, 1);
     gfx_text(148, 8, "FILE", DC_DIM, 1);
-    gfx_text(202, 8, "VIEW", DC_DIM, 1);
+    gfx_text(196, 8, "EDIT", DC_DIM, 1);
+    gfx_text(246, 8, "FONT", DC_DIM, 1);
+    gfx_text(298, 8, "STYLE", DC_DIM, 1);
+    gfx_text(356, 8, "SIZE", DC_DIM, 1);
+    gfx_text(408, 8, "VIEW", DC_DIM, 1);
 
-    gfx_icon(34, 62, DC_INK, 0);
-    gfx_text(32, 96, "SYSTEM", DC_DIM, 1);
-    gfx_icon(34, 128, DC_INK, 1);
-    gfx_text(32, 162, "SCRIPT", DC_DIM, 1);
-    gfx_icon(548, 394, DC_BREAK, 1);
-    gfx_text(530, 428, "NOTES", DC_DIM, 1);
+    gfx_icon(34, 52, DC_INK, 0);
+    gfx_text(28, 86, "SYSTEM", DC_DIM, 1);
+    gfx_icon(34, 134, DC_BREAK, 1);
+    gfx_text(28, 168, "SCRIPT", DC_DIM, 1);
+    gfx_paint_icon(34, 216, DC_INK);
+    gfx_text(32, 250, "PAINT", DC_DIM, 1);
+    gfx_icon(552, 398, DC_BREAK, 1);
+    gfx_text(540, 432, "NOTES", DC_DIM, 1);
 
-    if (desktop->harvester.visible && desktop->script.visible) {
-        if (desktop->front_app == DC_APP_SCRIPT) {
-            draw_harvester(desktop, 0);
-            draw_script(desktop, 1);
-        } else {
-            draw_script(desktop, 0);
-            draw_harvester(desktop, 1);
-        }
-    } else if (desktop->harvester.visible) {
-        draw_harvester(desktop, 1);
-    } else if (desktop->script.visible) {
-        draw_script(desktop, 1);
+    struct window_state const *windows[3];
+    const char *titles[3];
+    int count = 0;
+    if (desktop->harvester.visible) {
+        windows[count] = &desktop->harvester;
+        titles[count++] = "H";
+    }
+    if (desktop->script.visible) {
+        windows[count] = &desktop->script;
+        titles[count++] = "S";
+    }
+    if (desktop->paint.visible) {
+        windows[count] = &desktop->paint;
+        titles[count++] = "P";
+    }
+
+    /* Draw back to front: non-front first */
+    for (int pass = 0; pass < 2; ++pass) {
+        if (desktop->harvester.visible &&
+            ((pass == 0 && desktop->front_app != DC_APP_HARVESTER) ||
+             (pass == 1 && desktop->front_app == DC_APP_HARVESTER)))
+            draw_harvester(desktop, desktop->front_app == DC_APP_HARVESTER);
+        if (desktop->script.visible &&
+            ((pass == 0 && desktop->front_app != DC_APP_SCRIPT) ||
+             (pass == 1 && desktop->front_app == DC_APP_SCRIPT)))
+            draw_script(desktop, desktop->front_app == DC_APP_SCRIPT);
+        if (desktop->paint.visible &&
+            ((pass == 0 && desktop->front_app != DC_APP_PAINT) ||
+             (pass == 1 && desktop->front_app == DC_APP_PAINT)))
+            draw_paint(desktop, desktop->front_app == DC_APP_PAINT);
     }
 
     draw_storage_status(desktop);
     draw_menu(desktop);
-    if (desktop->about_open) {
-        draw_about();
-    }
+    if (desktop->about_open) draw_about();
     gfx_cursor(desktop->pointer_x, desktop->pointer_y);
     graphics_present();
+    (void)titles;
+    (void)windows;
+    (void)count;
 }

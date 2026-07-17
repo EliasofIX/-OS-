@@ -4,3 +4,12 @@
 document.raw
 demo/frames/
 demo/document.raw
+demo/smoke*.raw
+demo/bcs_walkthrough.raw
+demo/bcs_frames/
+demo/bcs_narration/
+demo/smoke*_frames/
+demo/probe*.raw
+demo/probe_frames/
+demo/walkthrough*
+demo/narration/

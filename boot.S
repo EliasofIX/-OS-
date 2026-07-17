@@ -57,5 +57,6 @@ hang:
 .section .bss
 .align 16
 stack_bottom:
-    .skip 0x4000
+    /* 64KiB — desktop/event paths nest past the old 16KiB budget. */
+    .skip 0x10000
 stack_top:

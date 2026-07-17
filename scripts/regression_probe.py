@@ -191,25 +191,6 @@ class Qemu:
 
 def ppm_has_ink_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
     data = path.read_bytes()
-    header_end = 0
-    parts = []
-    idx = 0
-    while len(parts) < 3:
-        while idx < len(data) and data[idx] in b" \t\r\n":
-            idx += 1
-        if data[idx : idx + 1] == b"#":
-            while idx < len(data) and data[idx] not in b"\n":
-                idx += 1
-            continue
-        start = idx
-        while idx < len(data) and data[idx] not in b" \t\r\n":
-            idx += 1
-        parts.append(data[start:idx].decode())
-    width, height = int(parts[1].split()[0] if " " in parts[1] else parts[1]), int(
-        parts[2] if len(parts) > 2 and parts[1].isdigit() else parts[1].split()[1]
-        if False
-        else 0
-    )
     # Robust parse
     lines = []
     pos = 0
@@ -224,7 +205,6 @@ def ppm_has_ink_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
     dims = lines[1].split()
     width = int(dims[0])
     height = int(dims[1])
-    maxval_line = lines[2]
     raw = data[pos:]
     assert magic == b"P6"
     for y in range(y0, min(y1, height)):
@@ -236,6 +216,30 @@ def ppm_has_ink_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
     return False
 
 
+def ppm_has_light_in_rect(path: Path, x0: int, y0: int, x1: int, y1: int) -> bool:
+    """Detect light UI text (e.g. menubar labels on a dark bar)."""
+    data = path.read_bytes()
+    lines = []
+    pos = 0
+    while len(lines) < 3:
+        nl = data.find(b"\n", pos)
+        line = data[pos:nl]
+        pos = nl + 1
+        if line.startswith(b"#"):
+            continue
+        lines.append(line)
+    width = int(lines[1].split()[0])
+    height = int(lines[1].split()[1])
+    raw = data[pos:]
+    for y in range(y0, min(y1, height)):
+        for x in range(x0, min(x1, width)):
+            i = (y * width + x) * 3
+            r, g, b = raw[i], raw[i + 1], raw[i + 2]
+            if r > 140 and g > 140 and b > 140:
+                return True
+    return False
+
+
 def main() -> int:
     if not KERNEL.exists():
         print("build first")
@@ -243,6 +247,10 @@ def main() -> int:
     qemu = Qemu()
     try:
         time.sleep(2.0)
+        boot = qemu.capture("boot")
+        if not ppm_has_light_in_rect(boot, 8, 4, 200, 20):
+            fail("menubar text missing after boot (font/stack corruption?)")
+
         # Open paint via desktop icon (no window covering)
         qemu.click(50, 230)
         # Draw

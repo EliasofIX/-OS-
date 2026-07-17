@@ -704,7 +704,8 @@ int storage_available(void) { return block.ready; }
 
 enum storage_load_result storage_load_document(char *text, size_t capacity,
                                                size_t *length) {
-    struct script_store doc;
+    /* script_store is far larger than the boot stack. */
+    static struct script_store doc;
     enum storage_load_result result = storage_load_script(&doc);
     if (result != STORAGE_LOAD_OK) {
         return result;
@@ -719,7 +720,7 @@ enum storage_load_result storage_load_document(char *text, size_t capacity,
 }
 
 int storage_save_document(const char *text, size_t length) {
-    struct script_store doc;
+    static struct script_store doc;
     zero_memory(&doc, sizeof(doc));
     if (length > DOCUMENT_CAPACITY) {
         return 0;

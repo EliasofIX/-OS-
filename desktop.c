@@ -108,7 +108,8 @@ static void set_default_document(struct desktop_state *desktop) {
 }
 
 static void save_document(struct desktop_state *desktop) {
-    struct script_store store;
+    /* script_store is ~50KiB — must not live on the 16KiB boot stack. */
+    static struct script_store store;
     zero_bytes(&store, sizeof(store));
     copy_bytes(store.text, desktop->document, desktop->document_length);
     store.text[desktop->document_length] = '\0';
@@ -252,7 +253,7 @@ void desktop_init(struct desktop_state *desktop) {
     canvas_clear(desktop);
 
     {
-        struct script_store loaded;
+        static struct script_store loaded;
         desktop->storage_status = storage_load_script(&loaded);
         if (desktop->storage_status != STORAGE_LOAD_OK) {
             set_default_document(desktop);
@@ -1035,6 +1036,15 @@ static void draw_window_frame(const struct window_state *window,
     gfx_fill((struct rect){frame.x, frame.y + 27, frame.width, 1}, DC_INK);
     gfx_fill((struct rect){frame.x + 10, frame.y + 9, 9, 9}, DC_INK);
     gfx_fill((struct rect){frame.x + 12, frame.y + 11, 5, 5}, DC_SURFACE);
+    /* Punch a clear plate behind the title so stripes do not erase glyphs. */
+    {
+        int title_w = 0;
+        for (const char *p = title; *p; ++p) {
+            title_w += gfx_font_advance(DC_FONT_CHICAGO, 1);
+        }
+        gfx_fill((struct rect){frame.x + 32, frame.y + 6, title_w + 8, 16},
+                 active ? DC_DIM : DC_SHADOW);
+    }
     gfx_text(frame.x + 35, frame.y + 10, title, active ? DC_INK : DC_SURFACE, 1);
 }
 

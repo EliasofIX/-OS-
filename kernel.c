@@ -35,7 +35,7 @@ void kmain(const void *dtb) {
     uart_puts("Discovering devices...\n");
     virtio_init(dtb);
 
-    /* Large paint/document buffers must not live on the 16KiB boot stack. */
+    /* Large paint/document buffers must not live on the boot stack. */
     static struct desktop_state desktop;
     desktop_init(&desktop);
     desktop.needs_redraw = 1;

@@ -9,7 +9,14 @@
 #define DOCUMENT_CAPACITY 2048
 #define PAINT_WIDTH  256
 #define PAINT_HEIGHT 160
-#define CLIP_TEXT_CAPACITY 512
+#define CLIP_TEXT_CAPACITY DOCUMENT_CAPACITY
+#define RICH_ATTR_BYTES DOCUMENT_CAPACITY
+#define EMBED_META_BYTES 512
+#define EMBED_IMAGE_BYTES (PAINT_WIDTH * PAINT_HEIGHT)
+#define EMBED_IMAGE_SECTORS ((EMBED_IMAGE_BYTES + 511) / 512)
+#define SCRIPT_TEXT_SECTORS 4
+#define SCRIPT_ATTR_SECTORS 4
+#define SCRIPT_SLOT_SECTORS (1 + SCRIPT_TEXT_SECTORS + SCRIPT_ATTR_SECTORS + 1 + EMBED_IMAGE_SECTORS)
 
 #define RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
 #define DC_VOID    RGB(12, 12, 14)
@@ -121,7 +128,9 @@ struct desktop_state {
     int drag_offset_y;
     enum menu_id menu_open;
     int about_open;
+    int confirm_new_open;
     int save_notice;
+    int clip_truncated;
     int shift_down;
     enum storage_load_result storage_status;
 
@@ -193,6 +202,21 @@ int storage_available(void);
 enum storage_load_result storage_load_document(char *text, size_t capacity,
                                                size_t *length);
 int storage_save_document(const char *text, size_t length);
+
+struct script_store {
+    char text[DOCUMENT_CAPACITY + 1];
+    size_t length;
+    uint8_t font[DOCUMENT_CAPACITY];
+    uint8_t style[DOCUMENT_CAPACITY];
+    uint8_t size[DOCUMENT_CAPACITY];
+    int embed_valid;
+    int embed_width;
+    int embed_height;
+    uint8_t embed_image[PAINT_WIDTH * PAINT_HEIGHT];
+};
+
+enum storage_load_result storage_load_script(struct script_store *doc);
+int storage_save_script(const struct script_store *doc);
 
 void desktop_init(struct desktop_state *desktop);
 void desktop_handle_event(struct desktop_state *desktop,

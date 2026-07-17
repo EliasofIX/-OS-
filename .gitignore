@@ -13,3 +13,7 @@ demo/probe*.raw
 demo/probe_frames/
 demo/walkthrough*
 demo/narration/
+demo/regression.raw
+demo/regression_frames/
+demo/proof*
+

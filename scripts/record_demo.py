@@ -147,10 +147,34 @@ class QemuDemo:
         self.pause(0.15)
 
     def drag(self, x0: int, y0: int, x1: int, y1: int, steps: int = 8) -> None:
-        for step in range(steps + 1):
+        abs_x, abs_y = to_abs(x0, y0)
+        self._qmp(
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "abs", "data": {"axis": "x", "value": abs_x}},
+                        {"type": "abs", "data": {"axis": "y", "value": abs_y}},
+                        {"type": "btn", "data": {"down": True, "button": "left"}},
+                    ]
+                },
+            }
+        )
+        self.pause(0.15)
+        for step in range(1, steps + 1):
             x = x0 + (x1 - x0) * step // steps
             y = y0 + (y1 - y0) * step // steps
             self.move(x, y)
+        self._qmp(
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "btn", "data": {"down": False, "button": "left"}},
+                    ]
+                },
+            }
+        )
         self.pause(0.2)
 
     def type_text(self, text: str) -> None:
@@ -215,30 +239,51 @@ def main() -> int:
         demo.pause(2.0)
         demo.capture(3)
 
-        demo.click(130, 190)
+        # Open Script from Harvester NOTES/SCRIPT row.
+        demo.click(120, 180)
         demo.capture(2)
 
         demo.type_text("Digital Caviar\n\nA quiet machine.\n")
         demo.capture(2)
 
+        # File → Save
         demo.click(170, 12)
         demo.capture(1)
-        demo.click(202, 35)
+        demo.click(190, 38)
         demo.capture(3)
 
-        demo.click(225, 12)
+        # Font → London, Style → Bold
+        demo.click(270, 12)
         demo.capture(1)
-        demo.click(281, 41)
+        demo.click(290, 94)
+        demo.capture(2)
+        demo.click(320, 12)
+        demo.capture(1)
+        demo.click(340, 66)
+        demo.capture(2)
+
+        # View → Acknowledgment
+        demo.click(430, 12)
+        demo.capture(1)
+        demo.click(450, 38)
         demo.capture(3)
         demo.click(402, 318)
         demo.capture(2)
 
-        demo.move(300, 130)
-        demo.drag(300, 130, 360, 170)
+        # Open Paint, draw, copy, paste into Script.
+        demo.click(50, 230)
         demo.capture(2)
-
-        demo.click(560, 410)
+        demo.drag(180, 120, 300, 170)
         demo.capture(2)
+        demo.click(100, 230)  # SELECT
+        demo.drag(160, 100, 330, 200)
+        demo.click(210, 12)
+        demo.click(230, 66)  # Copy
+        demo.capture(2)
+        demo.click(50, 150)  # Script
+        demo.click(210, 12)
+        demo.click(230, 94)  # Paste
+        demo.capture(3)
     finally:
         demo.close()
 

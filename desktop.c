@@ -30,6 +30,9 @@ static struct window_state *front_window(struct desktop_state *desktop) {
     return &desktop->harvester;
 }
 
+static void close_window(struct desktop_state *desktop,
+                         struct window_state *window);
+
 static void ensure_shell_visible(struct desktop_state *desktop) {
     if (!desktop->harvester.visible && !desktop->script.visible &&
         !desktop->paint.visible) {
@@ -105,9 +108,22 @@ static void set_default_document(struct desktop_state *desktop) {
 }
 
 static void save_document(struct desktop_state *desktop) {
-    desktop->save_notice =
-        storage_save_document(desktop->document, desktop->document_length) ? 1
-                                                                           : -1;
+    struct script_store store;
+    zero_bytes(&store, sizeof(store));
+    copy_bytes(store.text, desktop->document, desktop->document_length);
+    store.text[desktop->document_length] = '\0';
+    store.length = desktop->document_length;
+    copy_bytes(store.font, desktop->doc_font, desktop->document_length);
+    copy_bytes(store.style, desktop->doc_style, desktop->document_length);
+    copy_bytes(store.size, desktop->doc_size, desktop->document_length);
+    store.embed_valid = desktop->embed_valid;
+    store.embed_width = desktop->embed_width;
+    store.embed_height = desktop->embed_height;
+    if (desktop->embed_valid) {
+        copy_bytes(store.embed_image, desktop->embed_image,
+                   (size_t)desktop->embed_width * desktop->embed_height);
+    }
+    desktop->save_notice = storage_save_script(&store) ? 1 : -1;
     if (desktop->save_notice > 0) {
         desktop->document_dirty = 0;
         desktop->storage_status = STORAGE_LOAD_OK;
@@ -186,13 +202,15 @@ static void canvas_oval(struct desktop_state *desktop, int x0, int y0, int x1,
     int cy = (top + bottom) / 2;
     int rx = maxi((right - left) / 2, 1);
     int ry = maxi((bottom - top) / 2, 1);
+    long outer = (long)rx * rx * (long)ry * ry;
+    long inner_rx = rx > 1 ? rx - 1 : 0;
+    long inner_ry = ry > 1 ? ry - 1 : 0;
+    long inner = inner_rx * inner_rx * inner_ry * inner_ry;
     for (int y = top; y <= bottom; ++y) {
         for (int x = left; x <= right; ++x) {
-            int dx = x - cx;
-            int dy = y - cy;
-            int value = dx * dx * ry * ry + dy * dy * rx * rx;
-            int outer = rx * rx * ry * ry;
-            int inner = (rx - 1) * (rx - 1) * (ry - 1) * (ry - 1);
+            long dx = x - cx;
+            long dy = y - cy;
+            long value = dx * dx * ry * ry + dy * dy * rx * rx;
             if (filled) {
                 if (value <= outer && pattern_on(desktop->paint_pattern, x, y))
                     canvas_set(desktop, x, y, 1);
@@ -233,19 +251,28 @@ void desktop_init(struct desktop_state *desktop) {
     desktop->needs_redraw = 1;
     canvas_clear(desktop);
 
-    desktop->storage_status =
-        storage_load_document(desktop->document, DOCUMENT_CAPACITY,
-                              &desktop->document_length);
-    if (desktop->storage_status != STORAGE_LOAD_OK) {
-        set_default_document(desktop);
-    } else {
-        for (size_t i = 0; i < desktop->document_length; ++i) {
-            desktop->doc_font[i] = DC_FONT_CHICAGO;
-            desktop->doc_style[i] = 0;
-            desktop->doc_size[i] = 1;
+    {
+        struct script_store loaded;
+        desktop->storage_status = storage_load_script(&loaded);
+        if (desktop->storage_status != STORAGE_LOAD_OK) {
+            set_default_document(desktop);
+        } else {
+            copy_bytes(desktop->document, loaded.text, loaded.length);
+            desktop->document[loaded.length] = '\0';
+            desktop->document_length = loaded.length;
+            copy_bytes(desktop->doc_font, loaded.font, loaded.length);
+            copy_bytes(desktop->doc_style, loaded.style, loaded.length);
+            copy_bytes(desktop->doc_size, loaded.size, loaded.length);
+            desktop->embed_valid = loaded.embed_valid;
+            desktop->embed_width = loaded.embed_width;
+            desktop->embed_height = loaded.embed_height;
+            if (loaded.embed_valid) {
+                copy_bytes(desktop->embed_image, loaded.embed_image,
+                           (size_t)loaded.embed_width * loaded.embed_height);
+            }
+            desktop->caret = desktop->document_length;
+            clear_selection(desktop);
         }
-        desktop->caret = desktop->document_length;
-        clear_selection(desktop);
     }
 }
 
@@ -350,7 +377,11 @@ static void clipboard_copy_text(struct desktop_state *desktop) {
     if (!selection_active(desktop)) return;
     selection_bounds(desktop, &start, &end);
     size_t length = end - start;
-    if (length > CLIP_TEXT_CAPACITY) length = CLIP_TEXT_CAPACITY;
+    desktop->clip_truncated = 0;
+    if (length > CLIP_TEXT_CAPACITY) {
+        length = CLIP_TEXT_CAPACITY;
+        desktop->clip_truncated = 1;
+    }
     copy_bytes(desktop->clipboard.text, desktop->document + start, length);
     desktop->clipboard.text[length] = '\0';
     desktop->clipboard.text_length = length;
@@ -403,6 +434,7 @@ static void clipboard_copy_paint(struct desktop_state *desktop) {
     desktop->clipboard.image_width = width;
     desktop->clipboard.image_height = height;
     desktop->clipboard.kind = CLIP_IMAGE;
+    desktop->clip_truncated = 0;
 }
 
 static void clipboard_paste_into_script(struct desktop_state *desktop) {
@@ -420,10 +452,6 @@ static void clipboard_paste_into_script(struct desktop_state *desktop) {
     desktop->embed_height = desktop->clipboard.image_height;
     desktop->embed_valid = 1;
     desktop->document_dirty = 1;
-    if (desktop->document_length + 8 < DOCUMENT_CAPACITY) {
-        const char *marker = "\n[PICTURE]\n";
-        for (int i = 0; marker[i]; ++i) insert_char(desktop, marker[i]);
-    }
 }
 
 static void clipboard_paste_into_paint(struct desktop_state *desktop) {
@@ -442,7 +470,7 @@ static void handle_key(struct desktop_state *desktop, uint16_t code,
         desktop->shift_down = value != 0;
         return;
     }
-    if (value == 0 || desktop->about_open) return;
+    if (value == 0 || desktop->about_open || desktop->confirm_new_open) return;
     if (desktop->front_app != DC_APP_SCRIPT || !desktop->script.visible) return;
 
     desktop->save_notice = 0;
@@ -461,16 +489,77 @@ static void handle_key(struct desktop_state *desktop, uint16_t code,
         insert_char(desktop, '\n');
         return;
     }
-    if (code == 105 && desktop->caret > 0) { /* left */
-        --desktop->caret;
-        if (!desktop->shift_down) clear_selection(desktop);
-        else desktop->has_selection = 1;
+    if (code == 105) { /* left */
+        if (desktop->caret == 0) return;
+        if (desktop->shift_down) {
+            if (!desktop->has_selection) desktop->sel_anchor = desktop->caret;
+            --desktop->caret;
+            desktop->has_selection = desktop->caret != desktop->sel_anchor;
+        } else {
+            --desktop->caret;
+            clear_selection(desktop);
+        }
         return;
     }
-    if (code == 106 && desktop->caret < desktop->document_length) { /* right */
-        ++desktop->caret;
-        if (!desktop->shift_down) clear_selection(desktop);
-        else desktop->has_selection = 1;
+    if (code == 106) { /* right */
+        if (desktop->caret >= desktop->document_length) return;
+        if (desktop->shift_down) {
+            if (!desktop->has_selection) desktop->sel_anchor = desktop->caret;
+            ++desktop->caret;
+            desktop->has_selection = desktop->caret != desktop->sel_anchor;
+        } else {
+            ++desktop->caret;
+            clear_selection(desktop);
+        }
+        return;
+    }
+    if (code == 103 || code == 108) { /* up / down */
+        size_t line_start = desktop->caret;
+        while (line_start > 0 && desktop->document[line_start - 1] != '\n') {
+            --line_start;
+        }
+        size_t column = desktop->caret - line_start;
+        if (code == 103) {
+            if (line_start == 0) return;
+            size_t prev_end = line_start - 1;
+            size_t prev_start = prev_end;
+            while (prev_start > 0 && desktop->document[prev_start - 1] != '\n') {
+                --prev_start;
+            }
+            size_t prev_len = prev_end - prev_start + 1;
+            size_t target = prev_start + mini((int)column, (int)prev_len);
+            if (desktop->shift_down) {
+                if (!desktop->has_selection) desktop->sel_anchor = desktop->caret;
+                desktop->caret = target;
+                desktop->has_selection = desktop->caret != desktop->sel_anchor;
+            } else {
+                desktop->caret = target;
+                clear_selection(desktop);
+            }
+        } else {
+            size_t next = desktop->caret;
+            while (next < desktop->document_length &&
+                   desktop->document[next] != '\n') {
+                ++next;
+            }
+            if (next >= desktop->document_length) return;
+            size_t next_start = next + 1;
+            size_t next_end = next_start;
+            while (next_end < desktop->document_length &&
+                   desktop->document[next_end] != '\n') {
+                ++next_end;
+            }
+            size_t next_len = next_end - next_start;
+            size_t target = next_start + mini((int)column, (int)next_len);
+            if (desktop->shift_down) {
+                if (!desktop->has_selection) desktop->sel_anchor = desktop->caret;
+                desktop->caret = target;
+                desktop->has_selection = desktop->caret != desktop->sel_anchor;
+            } else {
+                desktop->caret = target;
+                clear_selection(desktop);
+            }
+        }
         return;
     }
     char character = key_character(code, desktop->shift_down);
@@ -509,27 +598,23 @@ static struct rect menu_frame(enum menu_id menu) {
 
 static void handle_menu_command(struct desktop_state *desktop, enum menu_id menu,
                                 int item) {
+    int max_item = 2;
+    if (menu == MENU_SIZE) max_item = 1;
+    if (menu == MENU_VIEW) max_item = 0;
+    if (item < 0 || item > max_item) return;
+
     if (menu == MENU_FILE) {
         if (item == 0) { /* Save */
             if (desktop->front_app == DC_APP_SCRIPT) save_document(desktop);
         } else if (item == 1) { /* Close */
             struct window_state *window = front_window(desktop);
-            window->visible = 0;
-            if (desktop->script.visible) desktop->front_app = DC_APP_SCRIPT;
-            else if (desktop->paint.visible) desktop->front_app = DC_APP_PAINT;
-            else {
-                desktop->harvester.visible = 1;
-                desktop->front_app = DC_APP_HARVESTER;
-            }
-        } else if (item == 2) { /* New Paint page / clear */
-            if (desktop->front_app == DC_APP_PAINT) canvas_clear(desktop);
-            else if (desktop->front_app == DC_APP_SCRIPT) {
-                desktop->document_length = 0;
-                desktop->document[0] = '\0';
-                desktop->caret = 0;
-                desktop->embed_valid = 0;
-                clear_selection(desktop);
-                desktop->document_dirty = 1;
+            close_window(desktop, window);
+        } else if (item == 2) { /* New */
+            if (desktop->front_app == DC_APP_PAINT) {
+                canvas_clear(desktop);
+                desktop->has_marquee = 0;
+            } else if (desktop->front_app == DC_APP_SCRIPT) {
+                desktop->confirm_new_open = 1;
             }
         }
     } else if (menu == MENU_EDIT) {
@@ -542,6 +627,7 @@ static void handle_menu_command(struct desktop_state *desktop, enum menu_id menu
             else if (item == 2) clipboard_paste_into_paint(desktop);
         }
     } else if (menu == MENU_FONT) {
+        if (item >= DC_FONT_COUNT) return;
         apply_format_to_selection(desktop, 1, (enum dc_font)item, 0, 0, 0, 0, 0);
     } else if (menu == MENU_STYLE) {
         if (item == 0)
@@ -569,6 +655,36 @@ static struct rect script_text_rect(const struct window_state *window) {
                          window->frame.width - 36, window->frame.height - 100};
 }
 
+static int glyph_metrics(const struct desktop_state *desktop, size_t index,
+                         int *advance, int *height) {
+    int scale = desktop->doc_size[index] ? desktop->doc_size[index] : 1;
+    *advance = gfx_font_advance((enum dc_font)desktop->doc_font[index], scale);
+    *height = gfx_font_height(scale);
+    return scale;
+}
+
+static int word_pixel_width(const struct desktop_state *desktop, size_t start,
+                            size_t end) {
+    int width = 0;
+    for (size_t i = start; i < end; ++i) {
+        int advance = 0;
+        int height = 0;
+        glyph_metrics(desktop, i, &advance, &height);
+        (void)height;
+        width += advance;
+    }
+    return width;
+}
+
+static size_t word_end_index(const struct desktop_state *desktop, size_t start) {
+    size_t end = start;
+    while (end < desktop->document_length && desktop->document[end] != ' ' &&
+           desktop->document[end] != '\n') {
+        ++end;
+    }
+    return end;
+}
+
 static size_t hit_test_document(const struct desktop_state *desktop, int x,
                                 int y) {
     struct rect area = script_text_rect(&desktop->script);
@@ -576,19 +692,31 @@ static size_t hit_test_document(const struct desktop_state *desktop, int x,
     int cursor_y = area.y;
     int right = area.x + area.width;
     int bottom = area.y + area.height;
-    size_t best = desktop->document_length;
-    for (size_t i = 0; i < desktop->document_length; ++i) {
-        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
-        int advance = gfx_font_advance((enum dc_font)desktop->doc_font[i], scale);
-        int height = gfx_font_height(scale);
+    size_t i = 0;
+    while (i < desktop->document_length) {
         char value = desktop->document[i];
-        if (value == '\n' || cursor_x + advance > right) {
+        int advance = 0;
+        int height = 0;
+        glyph_metrics(desktop, i, &advance, &height);
+        if (value == '\n') {
+            if (y < cursor_y + height + 2) return i;
             cursor_x = area.x;
             cursor_y += height + 2;
-            if (value == '\n') {
-                if (y < cursor_y) return i;
-                continue;
+            ++i;
+            continue;
+        }
+        if (value != ' ') {
+            size_t end = word_end_index(desktop, i);
+            int word_w = word_pixel_width(desktop, i, end);
+            if (cursor_x > area.x && cursor_x + word_w > right) {
+                cursor_x = area.x;
+                cursor_y += height + 2;
             }
+        } else if (cursor_x + advance > right && cursor_x > area.x) {
+            cursor_x = area.x;
+            cursor_y += height + 2;
+            ++i;
+            continue;
         }
         if (cursor_y + height >= bottom) break;
         if (y >= cursor_y && y < cursor_y + height && x >= cursor_x &&
@@ -596,9 +724,9 @@ static size_t hit_test_document(const struct desktop_state *desktop, int x,
             return i + (x > cursor_x + advance / 2 ? 1 : 0);
         }
         cursor_x += advance;
-        best = i + 1;
+        ++i;
     }
-    return best;
+    return desktop->document_length;
 }
 
 static void close_window(struct desktop_state *desktop,
@@ -613,8 +741,57 @@ static void close_window(struct desktop_state *desktop,
     ensure_shell_visible(desktop);
 }
 
+static int point_hits_window(const struct desktop_state *desktop, int x, int y) {
+    if (desktop->harvester.visible && contains(desktop->harvester.frame, x, y))
+        return 1;
+    if (desktop->script.visible && contains(desktop->script.frame, x, y)) return 1;
+    if (desktop->paint.visible && contains(desktop->paint.frame, x, y)) return 1;
+    return 0;
+}
+
+/* Front first, then other visible apps in reverse stable draw order (P,S,H). */
+static void apps_front_to_back(const struct desktop_state *desktop,
+                               enum dc_app out[3], int *count) {
+    *count = 0;
+    struct window_state const *front =
+        desktop->front_app == DC_APP_SCRIPT
+            ? &desktop->script
+            : (desktop->front_app == DC_APP_PAINT ? &desktop->paint
+                                                  : &desktop->harvester);
+    if (front->visible) {
+        out[(*count)++] = desktop->front_app;
+    }
+    enum dc_app stable[3] = {DC_APP_PAINT, DC_APP_SCRIPT, DC_APP_HARVESTER};
+    for (int i = 0; i < 3; ++i) {
+        enum dc_app app = stable[i];
+        if (app == desktop->front_app) continue;
+        struct window_state const *window =
+            app == DC_APP_SCRIPT
+                ? &desktop->script
+                : (app == DC_APP_PAINT ? &desktop->paint : &desktop->harvester);
+        if (!window->visible) continue;
+        out[(*count)++] = app;
+    }
+}
+
 static void handle_press(struct desktop_state *desktop, int x, int y) {
     desktop->save_notice = 0;
+
+    if (desktop->confirm_new_open) {
+        if (contains((struct rect){250, 300, 84, 26}, x, y)) {
+            desktop->document_length = 0;
+            desktop->document[0] = '\0';
+            desktop->caret = 0;
+            desktop->embed_valid = 0;
+            clear_selection(desktop);
+            desktop->document_dirty = 1;
+            desktop->confirm_new_open = 0;
+        } else if (contains((struct rect){350, 300, 84, 26}, x, y) ||
+                   !contains((struct rect){188, 170, 272, 170}, x, y)) {
+            desktop->confirm_new_open = 0;
+        }
+        return;
+    }
 
     if (desktop->about_open) {
         if (contains((struct rect){360, 305, 84, 26}, x, y)) {
@@ -643,31 +820,10 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
         return;
     }
 
-    /* Desktop icons */
-    if (contains((struct rect){24, 48, 70, 70}, x, y)) {
-        open_harvester(desktop);
-        return;
-    }
-    if (contains((struct rect){24, 130, 70, 70}, x, y)) {
-        open_script(desktop);
-        return;
-    }
-    if (contains((struct rect){24, 212, 70, 70}, x, y)) {
-        open_paint(desktop);
-        return;
-    }
-    if (contains((struct rect){540, 390, 80, 70}, x, y)) {
-        open_script(desktop);
-        return;
-    }
-
-    enum dc_app order[3] = {desktop->front_app, DC_APP_SCRIPT, DC_APP_PAINT};
-    order[1] = desktop->front_app == DC_APP_HARVESTER ? DC_APP_SCRIPT
-                                                      : DC_APP_HARVESTER;
-    order[2] = desktop->front_app == DC_APP_PAINT ? DC_APP_SCRIPT : DC_APP_PAINT;
-    if (order[1] == order[2]) order[2] = DC_APP_HARVESTER;
-
-    for (int index = 0; index < 3; ++index) {
+    enum dc_app order[3];
+    int order_count = 0;
+    apps_front_to_back(desktop, order, &order_count);
+    for (int index = 0; index < order_count; ++index) {
         enum dc_app app = order[index];
         struct window_state *window =
             app == DC_APP_SCRIPT
@@ -693,7 +849,7 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
             if (contains((struct rect){window->frame.x + 22, window->frame.y + 56,
                                        150, 40},
                          x, y)) {
-                open_harvester(desktop);
+                desktop->about_open = 1; /* SYSTEM → Acknowledgment */
             } else if (contains((struct rect){window->frame.x + 22,
                                               window->frame.y + 110, 150, 40},
                                 x, y)) {
@@ -720,7 +876,6 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
         }
 
         if (app == DC_APP_PAINT) {
-            /* Tool palette */
             int tool_x = window->frame.x + 12;
             int tool_y = window->frame.y + 40;
             for (int tool = 0; tool < 6; ++tool) {
@@ -761,6 +916,26 @@ static void handle_press(struct desktop_state *desktop, int x, int y) {
             return;
         }
         return;
+    }
+
+    /* Desktop icons only when no window covers the point. */
+    if (!point_hits_window(desktop, x, y)) {
+        if (contains((struct rect){24, 48, 70, 70}, x, y)) {
+            open_harvester(desktop);
+            return;
+        }
+        if (contains((struct rect){24, 130, 70, 70}, x, y)) {
+            open_script(desktop);
+            return;
+        }
+        if (contains((struct rect){24, 212, 70, 70}, x, y)) {
+            open_paint(desktop);
+            return;
+        }
+        if (contains((struct rect){540, 390, 80, 70}, x, y)) {
+            open_script(desktop);
+            return;
+        }
     }
 }
 
@@ -827,13 +1002,12 @@ void desktop_handle_event(struct desktop_state *desktop,
                                   &cy)) {
                     desktop->stroke_x1 = cx;
                     desktop->stroke_y1 = cy;
-                    if (desktop->tool == PAINT_PENCIL ||
-                        desktop->tool == PAINT_ERASER) {
-                        canvas_line(desktop, desktop->stroke_x0,
-                                    desktop->stroke_y0, cx, cy,
-                                    desktop->tool == PAINT_ERASER);
+                    if (desktop->tool == PAINT_SELECT) {
+                        desktop->marquee_x1 = cx;
+                        desktop->marquee_y1 = cy;
                     }
                 }
+                /* Pencil/eraser already painted during drag — do not redraw. */
             }
             finish_paint_stroke(desktop);
         }
@@ -881,26 +1055,62 @@ static void draw_harvester(const struct desktop_state *desktop, int active) {
 
 static void draw_document(const struct desktop_state *desktop) {
     struct rect area = script_text_rect(&desktop->script);
+    int text_bottom = area.y + area.height;
+    if (desktop->embed_valid) {
+        text_bottom -= desktop->embed_height + 24;
+        if (text_bottom < area.y + 24) text_bottom = area.y + 24;
+    }
     int cursor_x = area.x;
     int cursor_y = area.y;
     int right = area.x + area.width;
-    int bottom = area.y + area.height;
     size_t sel_start = 0;
     size_t sel_end = 0;
     selection_bounds(desktop, &sel_start, &sel_end);
     char text[2] = {0, 0};
+    int caret_x = area.x;
+    int caret_y = area.y;
+    int caret_set = 0;
 
-    for (size_t i = 0; i < desktop->document_length && cursor_y + 8 < bottom; ++i) {
-        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
-        enum dc_font font = (enum dc_font)desktop->doc_font[i];
-        int advance = gfx_font_advance(font, scale);
-        int height = gfx_font_height(scale);
+    size_t i = 0;
+    while (i < desktop->document_length && cursor_y + 8 < text_bottom) {
         char value = desktop->document[i];
-        if (value == '\n' || cursor_x + advance > right) {
+        int advance = 0;
+        int height = 0;
+        int scale = glyph_metrics(desktop, i, &advance, &height);
+        enum dc_font font = (enum dc_font)desktop->doc_font[i];
+
+        if (value == '\n') {
+            if (!caret_set && desktop->caret == i) {
+                caret_x = cursor_x;
+                caret_y = cursor_y;
+                caret_set = 1;
+            }
             cursor_x = area.x;
             cursor_y += height + 2;
-            if (value == '\n') continue;
+            ++i;
+            continue;
         }
+        if (value != ' ') {
+            size_t end = word_end_index(desktop, i);
+            int word_w = word_pixel_width(desktop, i, end);
+            if (cursor_x > area.x && cursor_x + word_w > right) {
+                cursor_x = area.x;
+                cursor_y += height + 2;
+                if (cursor_y + 8 >= text_bottom) break;
+            }
+        } else if (cursor_x + advance > right && cursor_x > area.x) {
+            cursor_x = area.x;
+            cursor_y += height + 2;
+            ++i;
+            continue;
+        }
+
+        if (!caret_set && desktop->caret == i) {
+            caret_x = cursor_x;
+            caret_y = cursor_y;
+            caret_set = 1;
+        }
+
         int selected = desktop->has_selection && i >= sel_start && i < sel_end;
         if (selected) {
             gfx_fill((struct rect){cursor_x, cursor_y, advance, height}, DC_SELECT);
@@ -908,42 +1118,22 @@ static void draw_document(const struct desktop_state *desktop) {
         text[0] = value;
         gfx_text_font(cursor_x, cursor_y, text, selected ? DC_SURFACE : DC_INK,
                       scale, font, desktop->doc_style[i]);
-        if (i + 1 == desktop->caret ||
-            (desktop->caret == desktop->document_length &&
-             i + 1 == desktop->document_length && !desktop->has_selection)) {
-            /* caret after this glyph drawn below */
-        }
         cursor_x += advance;
+        ++i;
     }
-
-    /* caret */
-    int caret_x = area.x;
-    int caret_y = area.y;
-    for (size_t i = 0; i < desktop->caret && i < desktop->document_length; ++i) {
-        int scale = desktop->doc_size[i] ? desktop->doc_size[i] : 1;
-        int advance =
-            gfx_font_advance((enum dc_font)desktop->doc_font[i], scale);
-        int height = gfx_font_height(scale);
-        char value = desktop->document[i];
-        if (value == '\n' || caret_x + advance > right) {
-            caret_x = area.x;
-            caret_y += height + 2;
-            if (value == '\n') continue;
-        }
-        caret_x += advance;
+    if (!caret_set) {
+        caret_x = cursor_x;
+        caret_y = cursor_y;
     }
-    if (!desktop->has_selection && caret_y + 8 < bottom) {
+    if (!desktop->has_selection && caret_y + 8 < text_bottom) {
         int scale = desktop->typing_size ? desktop->typing_size : 1;
         gfx_fill((struct rect){caret_x, caret_y, 1, gfx_font_height(scale)},
                  DC_INK);
     }
 
     if (desktop->embed_valid) {
-        int image_y = area.y + area.height - desktop->embed_height - 8;
-        if (image_y < cursor_y + 16) {
-            image_y = mini(bottom - desktop->embed_height - 4, cursor_y + 16);
-        }
-        if (image_y + desktop->embed_height <= bottom) {
+        int image_y = area.y + area.height - desktop->embed_height - 4;
+        if (image_y >= text_bottom - 4) {
             gfx_text(area.x, image_y - 12, "PASTED PICTURE", DC_SHADOW, 1);
             gfx_bitmap(area.x, image_y, desktop->embed_image, desktop->embed_width,
                        desktop->embed_height, DC_INK, DC_SURFACE, 1);
@@ -1056,6 +1246,20 @@ static void draw_about(void) {
     gfx_text(380, 315, "DISMISS", DC_SURFACE, 1);
 }
 
+static void draw_confirm_new(void) {
+    struct rect dialog = {188, 170, 272, 170};
+    gfx_dither((struct rect){dialog.x + 9, dialog.y + 10, dialog.width,
+                             dialog.height},
+               DC_SHADOW, DC_VOID, 40);
+    gfx_fill(dialog, DC_SURFACE);
+    gfx_text(210, 200, "ERASE DOCUMENT?", DC_INK, 1);
+    gfx_text(210, 230, "THIS CANNOT BE UNDONE", DC_SHADOW, 1);
+    gfx_fill((struct rect){250, 300, 84, 26}, DC_BREAK);
+    gfx_text(268, 310, "ERASE", DC_SURFACE, 1);
+    gfx_fill((struct rect){350, 300, 84, 26}, DC_ACCENT);
+    gfx_text(362, 310, "CANCEL", DC_SURFACE, 1);
+}
+
 static void draw_storage_status(const struct desktop_state *desktop) {
     if (desktop->save_notice) {
         gfx_text(24, 452,
@@ -1066,7 +1270,10 @@ static void draw_storage_status(const struct desktop_state *desktop) {
     if (desktop->clipboard.kind == CLIP_IMAGE) {
         gfx_text(24, 452, "CLIPBOARD: PICTURE", DC_ACCENT, 1);
     } else if (desktop->clipboard.kind == CLIP_TEXT) {
-        gfx_text(24, 452, "CLIPBOARD: TEXT", DC_ACCENT, 1);
+        gfx_text(24, 452,
+                 desktop->clip_truncated ? "CLIPBOARD: TEXT TRUNCATED"
+                                         : "CLIPBOARD: TEXT",
+                 desktop->clip_truncated ? DC_BREAK : DC_ACCENT, 1);
     } else if (desktop->storage_status == STORAGE_LOAD_CORRUPT) {
         gfx_text(24, 452, "STORAGE CORRUPT", DC_BREAK, 1);
     } else if (desktop->storage_status == STORAGE_LOAD_NO_MEDIA) {
@@ -1102,41 +1309,26 @@ void desktop_render(const struct desktop_state *desktop) {
     struct window_state const *windows[3];
     const char *titles[3];
     int count = 0;
-    if (desktop->harvester.visible) {
-        windows[count] = &desktop->harvester;
-        titles[count++] = "H";
-    }
-    if (desktop->script.visible) {
-        windows[count] = &desktop->script;
-        titles[count++] = "S";
-    }
-    if (desktop->paint.visible) {
-        windows[count] = &desktop->paint;
-        titles[count++] = "P";
-    }
+    (void)windows;
+    (void)titles;
+    (void)count;
 
-    /* Draw back to front: non-front first */
-    for (int pass = 0; pass < 2; ++pass) {
-        if (desktop->harvester.visible &&
-            ((pass == 0 && desktop->front_app != DC_APP_HARVESTER) ||
-             (pass == 1 && desktop->front_app == DC_APP_HARVESTER)))
-            draw_harvester(desktop, desktop->front_app == DC_APP_HARVESTER);
-        if (desktop->script.visible &&
-            ((pass == 0 && desktop->front_app != DC_APP_SCRIPT) ||
-             (pass == 1 && desktop->front_app == DC_APP_SCRIPT)))
-            draw_script(desktop, desktop->front_app == DC_APP_SCRIPT);
-        if (desktop->paint.visible &&
-            ((pass == 0 && desktop->front_app != DC_APP_PAINT) ||
-             (pass == 1 && desktop->front_app == DC_APP_PAINT)))
-            draw_paint(desktop, desktop->front_app == DC_APP_PAINT);
+    enum dc_app order[3];
+    int order_count = 0;
+    apps_front_to_back(desktop, order, &order_count);
+    /* Draw back-to-front = reverse of hit order. */
+    for (int index = order_count - 1; index >= 0; --index) {
+        enum dc_app app = order[index];
+        int active = app == desktop->front_app;
+        if (app == DC_APP_HARVESTER) draw_harvester(desktop, active);
+        else if (app == DC_APP_SCRIPT) draw_script(desktop, active);
+        else if (app == DC_APP_PAINT) draw_paint(desktop, active);
     }
 
     draw_storage_status(desktop);
     draw_menu(desktop);
     if (desktop->about_open) draw_about();
+    if (desktop->confirm_new_open) draw_confirm_new();
     gfx_cursor(desktop->pointer_x, desktop->pointer_y);
     graphics_present();
-    (void)titles;
-    (void)windows;
-    (void)count;
 }

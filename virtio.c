@@ -97,6 +97,8 @@ struct input_device {
     int pointer_x;
     int pointer_y;
     int move_pending;
+    int abs_x_fresh;
+    int abs_y_fresh;
     struct input_queue queue;
 };
 
@@ -408,17 +410,26 @@ static int handle_input_packet(struct input_device *device,
         if (packet->code == ABS_X) {
             device->pointer_x = (int)((uint64_t)packet->value * (SCREEN_WIDTH - 1) /
                                       32767U);
+            device->abs_x_fresh = 1;
             device->move_pending = 1;
         } else if (packet->code == ABS_Y) {
             device->pointer_y =
                 (int)((uint64_t)packet->value * (SCREEN_HEIGHT - 1) / 32767U);
+            device->abs_y_fresh = 1;
             device->move_pending = 1;
         }
-        /* Emit immediately so QMP abs streams without SYN still drag. */
-        return emit_tablet_move(device, event);
+        /* Emit only once both axes are fresh (QMP often omits SYN). */
+        if (device->abs_x_fresh && device->abs_y_fresh) {
+            device->abs_x_fresh = 0;
+            device->abs_y_fresh = 0;
+            return emit_tablet_move(device, event);
+        }
+        return 0;
     }
     if (device->kind == INPUT_TABLET && packet->type == EV_SYN &&
         packet->code == SYN_REPORT) {
+        device->abs_x_fresh = 0;
+        device->abs_y_fresh = 0;
         return emit_tablet_move(device, event);
     }
     if (device->kind == INPUT_TABLET && packet->type == EV_KEY &&
@@ -558,8 +569,10 @@ static void flush_disk(void) {
     }
 }
 
-#define DOCUMENT_MAGIC 0x4443415649415231ULL
-#define SLOT_SECTORS 5
+#define DOCUMENT_MAGIC_V1 0x4443415649415231ULL
+#define DOCUMENT_MAGIC_V2 0x4443415649415232ULL
+#define SLOT_SECTORS_V1 5
+#define SLOT_SECTORS SCRIPT_SLOT_SECTORS
 
 struct document_commit {
     uint64_t magic;
@@ -569,7 +582,11 @@ struct document_commit {
     uint32_t length_inverse;
     uint32_t checksum;
     uint32_t metadata_checksum;
-    uint8_t reserved[472];
+    uint32_t embed_valid;
+    uint32_t embed_width;
+    uint32_t embed_height;
+    uint32_t embed_checksum;
+    uint8_t reserved[456];
 };
 
 static uint32_t checksum(const void *data, size_t length) {
@@ -582,8 +599,8 @@ static uint32_t checksum(const void *data, size_t length) {
     return value;
 }
 
-static int valid_commit(const struct document_commit *commit) {
-    if (commit->magic != DOCUMENT_MAGIC ||
+static int valid_commit_v1(const struct document_commit *commit) {
+    if (commit->magic != DOCUMENT_MAGIC_V1 ||
         commit->generation_inverse != ~commit->generation ||
         commit->length_inverse != ~commit->length ||
         commit->length > DOCUMENT_CAPACITY) {
@@ -593,18 +610,45 @@ static int valid_commit(const struct document_commit *commit) {
            checksum(commit, offsetof(struct document_commit, metadata_checksum));
 }
 
-static int read_slot(int slot, struct document_commit *commit, char *text) {
-    uint64_t first = (uint64_t)slot * SLOT_SECTORS;
+static int valid_commit_v2(const struct document_commit *commit) {
+    if (commit->magic != DOCUMENT_MAGIC_V2 ||
+        commit->generation_inverse != ~commit->generation ||
+        commit->length_inverse != ~commit->length ||
+        commit->length > DOCUMENT_CAPACITY ||
+        commit->embed_width > PAINT_WIDTH ||
+        commit->embed_height > PAINT_HEIGHT) {
+        return 0;
+    }
+    return commit->metadata_checksum ==
+           checksum(commit, offsetof(struct document_commit, metadata_checksum));
+}
+
+static uint8_t pack_attr(uint8_t font, uint8_t style, uint8_t size) {
+    return (uint8_t)((font & 3U) | ((style & 3U) << 2) | ((size & 3U) << 4));
+}
+
+static void unpack_attr(uint8_t packed, uint8_t *font, uint8_t *style,
+                        uint8_t *size) {
+    *font = packed & 3U;
+    *style = (packed >> 2) & 3U;
+    *size = (packed >> 4) & 3U;
+    if (*size == 0) {
+        *size = 1;
+    }
+}
+
+static int read_slot_v1(int slot, struct document_commit *commit, char *text) {
+    uint64_t first = (uint64_t)slot * SLOT_SECTORS_V1;
     if (!read_sector(first, commit)) {
         return 0;
     }
     if (memory_is_zero(commit, sizeof(*commit))) {
         return 0;
     }
-    if (!valid_commit(commit)) {
+    if (!valid_commit_v1(commit)) {
         return -1;
     }
-    for (int sector = 0; sector < 4; ++sector) {
+    for (int sector = 0; sector < SCRIPT_TEXT_SECTORS; ++sector) {
         if (!read_sector(first + 1 + sector, text + sector * 512)) {
             return -1;
         }
@@ -612,57 +656,168 @@ static int read_slot(int slot, struct document_commit *commit, char *text) {
     return checksum(text, commit->length) == commit->checksum ? 1 : -1;
 }
 
+static int read_slot_v2(int slot, struct document_commit *commit, char *text,
+                        uint8_t *attrs, uint8_t *embed_image) {
+    uint64_t first = (uint64_t)slot * SLOT_SECTORS;
+    if (!read_sector(first, commit)) {
+        return 0;
+    }
+    if (memory_is_zero(commit, sizeof(*commit))) {
+        return 0;
+    }
+    if (!valid_commit_v2(commit)) {
+        return -1;
+    }
+    for (int sector = 0; sector < SCRIPT_TEXT_SECTORS; ++sector) {
+        if (!read_sector(first + 1 + sector, text + sector * 512)) {
+            return -1;
+        }
+    }
+    for (int sector = 0; sector < SCRIPT_ATTR_SECTORS; ++sector) {
+        if (!read_sector(first + 1 + SCRIPT_TEXT_SECTORS + sector,
+                         attrs + sector * 512)) {
+            return -1;
+        }
+    }
+    static uint8_t embed_meta[512];
+    if (!read_sector(first + 1 + SCRIPT_TEXT_SECTORS + SCRIPT_ATTR_SECTORS,
+                     embed_meta)) {
+        return -1;
+    }
+    for (int sector = 0; sector < EMBED_IMAGE_SECTORS; ++sector) {
+        if (!read_sector(first + 1 + SCRIPT_TEXT_SECTORS + SCRIPT_ATTR_SECTORS +
+                             1 + sector,
+                         embed_image + sector * 512)) {
+            return -1;
+        }
+    }
+    uint32_t rich = checksum(text, commit->length) ^
+                    checksum(attrs, commit->length);
+    if (commit->embed_valid) {
+        rich ^= checksum(embed_image,
+                         (size_t)commit->embed_width * commit->embed_height);
+    }
+    return rich == commit->checksum ? 1 : -1;
+}
+
 int storage_available(void) { return block.ready; }
 
 enum storage_load_result storage_load_document(char *text, size_t capacity,
                                                size_t *length) {
+    struct script_store doc;
+    enum storage_load_result result = storage_load_script(&doc);
+    if (result != STORAGE_LOAD_OK) {
+        return result;
+    }
+    if (capacity < doc.length) {
+        return STORAGE_LOAD_CORRUPT;
+    }
+    copy_memory(text, doc.text, doc.length);
+    text[doc.length] = '\0';
+    *length = doc.length;
+    return STORAGE_LOAD_OK;
+}
+
+int storage_save_document(const char *text, size_t length) {
+    struct script_store doc;
+    zero_memory(&doc, sizeof(doc));
+    if (length > DOCUMENT_CAPACITY) {
+        return 0;
+    }
+    copy_memory(doc.text, text, length);
+    doc.length = length;
+    for (size_t i = 0; i < length; ++i) {
+        doc.font[i] = DC_FONT_CHICAGO;
+        doc.style[i] = 0;
+        doc.size[i] = 1;
+    }
+    return storage_save_script(&doc);
+}
+
+enum storage_load_result storage_load_script(struct script_store *doc) {
     if (!block.ready) {
         return STORAGE_LOAD_NO_MEDIA;
     }
-    if (capacity < DOCUMENT_CAPACITY) {
-        return STORAGE_LOAD_CORRUPT;
-    }
+    zero_memory(doc, sizeof(*doc));
 
     struct document_commit first;
     struct document_commit second;
     static char first_text[DOCUMENT_CAPACITY + 1];
     static char second_text[DOCUMENT_CAPACITY + 1];
-    int first_status = read_slot(0, &first, first_text);
-    int second_status = read_slot(1, &second, second_text);
+    static uint8_t first_attrs[DOCUMENT_CAPACITY];
+    static uint8_t second_attrs[DOCUMENT_CAPACITY];
+    static uint8_t first_embed[EMBED_IMAGE_BYTES];
+    static uint8_t second_embed[EMBED_IMAGE_BYTES];
 
-    if (first_status < 0 || second_status < 0) {
+    int first_v2 = read_slot_v2(0, &first, first_text, first_attrs, first_embed);
+    int second_v2 =
+        read_slot_v2(1, &second, second_text, second_attrs, second_embed);
+
+    if (first_v2 > 0 || second_v2 > 0) {
+        int use_second =
+            second_v2 > 0 && (first_v2 <= 0 || second.generation > first.generation);
+        struct document_commit *chosen = use_second ? &second : &first;
+        const char *source = use_second ? second_text : first_text;
+        const uint8_t *attrs = use_second ? second_attrs : first_attrs;
+        const uint8_t *embed = use_second ? second_embed : first_embed;
+        copy_memory(doc->text, source, chosen->length);
+        doc->text[chosen->length] = '\0';
+        doc->length = chosen->length;
+        for (size_t i = 0; i < chosen->length; ++i) {
+            unpack_attr(attrs[i], &doc->font[i], &doc->style[i], &doc->size[i]);
+        }
+        doc->embed_valid = chosen->embed_valid != 0;
+        doc->embed_width = (int)chosen->embed_width;
+        doc->embed_height = (int)chosen->embed_height;
+        if (doc->embed_valid) {
+            copy_memory(doc->embed_image, embed,
+                        (size_t)doc->embed_width * doc->embed_height);
+        }
+        return STORAGE_LOAD_OK;
+    }
+
+    /* Fall back to legacy V1 text-only slots. */
+    int first_v1 = read_slot_v1(0, &first, first_text);
+    int second_v1 = read_slot_v1(1, &second, second_text);
+    if (first_v1 < 0 || second_v1 < 0) {
         return STORAGE_LOAD_CORRUPT;
     }
-    if (first_status == 0 && second_status == 0) {
+    if (first_v1 == 0 && second_v1 == 0) {
         return STORAGE_LOAD_EMPTY;
     }
-
-    int use_second = second_status > 0 &&
-                     (first_status == 0 || second.generation > first.generation);
+    int use_second =
+        second_v1 > 0 && (first_v1 == 0 || second.generation > first.generation);
     struct document_commit *chosen = use_second ? &second : &first;
     const char *source = use_second ? second_text : first_text;
-    copy_memory(text, source, chosen->length);
-    text[chosen->length] = '\0';
-    *length = chosen->length;
+    copy_memory(doc->text, source, chosen->length);
+    doc->text[chosen->length] = '\0';
+    doc->length = chosen->length;
+    for (size_t i = 0; i < chosen->length; ++i) {
+        doc->font[i] = DC_FONT_CHICAGO;
+        doc->style[i] = 0;
+        doc->size[i] = 1;
+    }
     return STORAGE_LOAD_OK;
 }
 
-int storage_save_document(const char *text, size_t length) {
-    if (!block.ready || length > DOCUMENT_CAPACITY) {
+int storage_save_script(const struct script_store *doc) {
+    if (!block.ready || doc->length > DOCUMENT_CAPACITY) {
         return 0;
     }
 
     struct document_commit first;
     struct document_commit second;
     static char scratch[DOCUMENT_CAPACITY + 1];
-    int first_status = read_slot(0, &first, scratch);
-    int second_status = read_slot(1, &second, scratch);
+    static uint8_t attrs[DOCUMENT_CAPACITY];
+    static uint8_t embed_scratch[EMBED_IMAGE_BYTES];
+    int first_status = read_slot_v2(0, &first, scratch, attrs, embed_scratch);
+    int second_status = read_slot_v2(1, &second, scratch, attrs, embed_scratch);
 
     uint64_t generation = 1;
     int slot = 0;
     if (first_status > 0 || second_status > 0) {
         if (second_status > 0 &&
-            (first_status == 0 || second.generation > first.generation)) {
+            (first_status <= 0 || second.generation > first.generation)) {
             generation = second.generation + 1;
             slot = 0;
         } else if (first_status > 0) {
@@ -672,10 +827,40 @@ int storage_save_document(const char *text, size_t length) {
     }
 
     zero_memory(scratch, sizeof(scratch));
-    copy_memory(scratch, text, length);
+    zero_memory(attrs, sizeof(attrs));
+    copy_memory(scratch, doc->text, doc->length);
+    for (size_t i = 0; i < doc->length; ++i) {
+        attrs[i] = pack_attr(doc->font[i], doc->style[i], doc->size[i]);
+    }
+
     uint64_t first_sector = (uint64_t)slot * SLOT_SECTORS;
-    for (int sector = 0; sector < 4; ++sector) {
+    for (int sector = 0; sector < SCRIPT_TEXT_SECTORS; ++sector) {
         if (!write_sector(first_sector + 1 + sector, scratch + sector * 512)) {
+            return 0;
+        }
+    }
+    for (int sector = 0; sector < SCRIPT_ATTR_SECTORS; ++sector) {
+        if (!write_sector(first_sector + 1 + SCRIPT_TEXT_SECTORS + sector,
+                          attrs + sector * 512)) {
+            return 0;
+        }
+    }
+    static uint8_t embed_meta[512];
+    zero_memory(embed_meta, sizeof(embed_meta));
+    embed_meta[0] = doc->embed_valid ? 1 : 0;
+    if (!write_sector(first_sector + 1 + SCRIPT_TEXT_SECTORS + SCRIPT_ATTR_SECTORS,
+                      embed_meta)) {
+        return 0;
+    }
+    zero_memory(embed_scratch, sizeof(embed_scratch));
+    if (doc->embed_valid) {
+        copy_memory(embed_scratch, doc->embed_image,
+                    (size_t)doc->embed_width * doc->embed_height);
+    }
+    for (int sector = 0; sector < EMBED_IMAGE_SECTORS; ++sector) {
+        if (!write_sector(first_sector + 1 + SCRIPT_TEXT_SECTORS +
+                              SCRIPT_ATTR_SECTORS + 1 + sector,
+                          embed_scratch + sector * 512)) {
             return 0;
         }
     }
@@ -683,12 +868,20 @@ int storage_save_document(const char *text, size_t length) {
 
     struct document_commit commit;
     zero_memory(&commit, sizeof(commit));
-    commit.magic = DOCUMENT_MAGIC;
+    commit.magic = DOCUMENT_MAGIC_V2;
     commit.generation = generation;
     commit.generation_inverse = ~generation;
-    commit.length = (uint32_t)length;
+    commit.length = (uint32_t)doc->length;
     commit.length_inverse = ~commit.length;
-    commit.checksum = checksum(text, length);
+    commit.embed_valid = doc->embed_valid ? 1U : 0U;
+    commit.embed_width = (uint32_t)doc->embed_width;
+    commit.embed_height = (uint32_t)doc->embed_height;
+    commit.checksum = checksum(scratch, doc->length) ^ checksum(attrs, doc->length);
+    if (doc->embed_valid) {
+        commit.checksum ^=
+            checksum(embed_scratch,
+                     (size_t)doc->embed_width * doc->embed_height);
+    }
     commit.metadata_checksum =
         checksum(&commit, offsetof(struct document_commit, metadata_checksum));
     if (!write_sector(first_sector, &commit)) {

@@ -9,7 +9,7 @@ ASFLAGS := --target=$(TARGET) -g
 LDFLAGS := --target=$(TARGET) -fuse-ld=lld -nostdlib \
 	-Wl,-T,linker_arm64.ld -Wl,--build-id=none
 
-.PHONY: all clean run demo-video bcs-walkthrough
+.PHONY: all clean run demo-video bcs-walkthrough regression-probe
 
 all: kernel.elf
 
@@ -47,6 +47,8 @@ demo-video: kernel.elf
 bcs-walkthrough: kernel.elf
 	python3 scripts/bcs_walkthrough.py
 
+regression-probe: kernel.elf
+	python3 scripts/regression_probe.py
+
 clean:
 	rm -f $(OBJECTS) kernel.elf desktop.ppm
-

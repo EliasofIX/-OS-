@@ -51,6 +51,19 @@ make demo-video
 
 The capture walks through boot, opening Script, typing, saving, the acknowledgment dialog, window drag, and the desktop Notes icon.
 
+Record a narrated Steve Jobs–style walkthrough to
+`/opt/cursor/artifacts/steve-jobs-macintosh-walkthrough.mp4`:
+
+```sh
+make walkthrough
+```
+
+Probe the desktop for interaction issues and write `ISSUES.md`:
+
+```sh
+make probe-issues
+```
+
 ## Using the desktop
 
 - Click and drag a title bar to move its window.

@@ -147,10 +147,34 @@ class QemuDemo:
         self.pause(0.15)
 
     def drag(self, x0: int, y0: int, x1: int, y1: int, steps: int = 8) -> None:
-        for step in range(steps + 1):
+        abs_x, abs_y = to_abs(x0, y0)
+        self._qmp(
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "abs", "data": {"axis": "x", "value": abs_x}},
+                        {"type": "abs", "data": {"axis": "y", "value": abs_y}},
+                        {"type": "btn", "data": {"down": True, "button": "left"}},
+                    ]
+                },
+            }
+        )
+        self.pause(0.15)
+        for step in range(1, steps + 1):
             x = x0 + (x1 - x0) * step // steps
             y = y0 + (y1 - y0) * step // steps
             self.move(x, y)
+        self._qmp(
+            {
+                "execute": "input-send-event",
+                "arguments": {
+                    "events": [
+                        {"type": "btn", "data": {"down": False, "button": "left"}},
+                    ]
+                },
+            }
+        )
         self.pause(0.2)
 
     def type_text(self, text: str) -> None:

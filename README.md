@@ -57,6 +57,12 @@ to `/opt/cursor/artifacts/bcs-macintosh-walkthrough.mp4`:
 make bcs-walkthrough
 ```
 
+Run the graphical regression probe:
+
+```sh
+make regression-probe
+```
+
 ## Using the desktop
 
 - Click desktop icons or Harvester rows to open **Script** or **Paint**.
